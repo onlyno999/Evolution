@@ -109,37 +109,50 @@ let globalAnalysis: any = null;
 let lastSyncTime = 0;
 
 async function syncData() {
-  const url = "https://wuk.168y.cloudns.org/";
-  try {
-    const response = await axios.get(`${url}?t=${Date.now()}`, {
-      headers: { 
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Referer": "https://wuk.168y.cloudns.org/"
-      },
-      timeout: 12000,
-    });
-    const dataStr = typeof response.data === "string" ? response.data : JSON.stringify(response.data);
-    const newRecords: any[] = [];
-    const pairRegex = /(\d{8,15})[\s\S]{1,200}?((\d{1,2},){9}\d{1,2})/g;
-    let m;
-    while ((m = pairRegex.exec(dataStr)) !== null) {
-      const p = m[1];
-      const r = m[2];
-      const nums = r.split(',').map(Number).filter(n => !isNaN(n) && n >= 1 && n <= 10);
-      if (nums.length === 10) newRecords.push({ period: p, numbers: nums });
+  // 采用多源备份策略：如果 primary 失败，尝试备用地址
+  const sources = [
+    "https://wuk.168y.cloudns.org/",
+    "http://wuk.168y.cloudns.org/"
+  ];
+  
+  for (const url of sources) {
+    try {
+      const response = await axios.get(`${url}?t=${Date.now()}`, {
+        headers: { 
+          "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Mobile/15E148 Safari/604.1",
+          "Referer": url,
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Cache-Control": "no-cache"
+        },
+        timeout: 9000, // 缩短超时，快速闪避
+      });
+      
+      const dataStr = typeof response.data === "string" ? response.data : JSON.stringify(response.data);
+      const newRecords: any[] = [];
+      const pairRegex = /(\d{8,15})[\s\S]{1,200}?((\d{1,2},){9}\d{1,2})/g;
+      let m;
+      while ((m = pairRegex.exec(dataStr)) !== null) {
+        const p = m[1];
+        const r = m[2];
+        const nums = r.split(',').map(Number).filter(n => !isNaN(n) && n >= 1 && n <= 10);
+        if (nums.length === 10 && !newRecords.find(nr => nr.period === p)) {
+          newRecords.push({ period: p, numbers: nums });
+        }
+      }
+      
+      if (newRecords.length > 0) {
+        newRecords.sort((a, b) => Number(b.period) - Number(a.period));
+        globalLotteryData = newRecords.slice(0, 150);
+        globalAnalysis = perform3DAnalysis(globalLotteryData);
+        lastSyncTime = Date.now();
+        console.log("✅ Sync Success from", url);
+        return { success: true, count: newRecords.length };
+      }
+    } catch (err: any) {
+      console.warn("⚠️ Source failed:", url, err.message);
     }
-    
-    if (newRecords.length > 0) {
-      newRecords.sort((a, b) => Number(b.period) - Number(a.period));
-      globalLotteryData = newRecords.slice(0, 150);
-      globalAnalysis = perform3DAnalysis(globalLotteryData);
-      lastSyncTime = Date.now();
-      return { success: true, count: newRecords.length };
-    }
-    return { success: false, reason: "No records found in HTML content" };
-  } catch (err: any) {
-    return { success: false, reason: err.message };
   }
+  return { success: false, reason: "All sources failed to provide valid data" };
 }
 
 // 路由兼容性处理：同时处理带 /api 前缀和不带前缀的情况
