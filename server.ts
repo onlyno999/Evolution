@@ -105,9 +105,9 @@ const manualSync = [
 async function terminalSyncAndAnalyze() {
   console.log("📡 [Background Sync] Analysis Terminal Sync Starting...");
   const sources = [
-    { url: "https://wuk.168y.cloudns.org/pks/getLotteryPksInfo.do?lotCode=10012", ref: "https://wuk.168y.cloudns.org/" },
     { url: "https://wuk.168y.cloudns.org/CurrentPk10/getCurrentRecord.do?lotCode=10012", ref: "https://wuk.168y.cloudns.org/" },
-    { url: "https://api.api68.com/pks/getLotteryPksInfo.do?lotCode=10012", ref: "https://api.api68.com/" }
+    { url: "https://api.api68.com/pks/getLotteryPksInfo.do?lotCode=10012", ref: "https://api.api68.com/" },
+    { url: "https://wuk.168y.cloudns.org/", ref: "https://wuk.168y.cloudns.org/" }
   ];
 
   let foundNextPeriod = "";
@@ -126,6 +126,27 @@ async function terminalSyncAndAnalyze() {
 
       const newRecords: any[] = [];
       const bodyStr = typeof response.data === "string" ? response.data : JSON.stringify(response.data);
+
+      if (source.url === "https://wuk.168y.cloudns.org/") {
+        // Scrape HTML using Cheerio
+        const $ = cheerio.load(response.data);
+        // Look for common patterns in 168y's HTML for PK10
+        // Usually it's in a table or complex divs
+        const htmlText = $("body").text();
+        const bodyMatches = bodyStr.match(/(\d{10,14})[\s\S]*?(\d{1,2}(,\d{1,2}){9})/g);
+        if (bodyMatches) {
+          bodyMatches.forEach(m => {
+             const p = m.match(/\d{10,14}/)?.[0];
+             const r = m.match(/\d{1,2}(,\d{1,2}){9}/)?.[0];
+             if (p && r) {
+               const nums = r.split(',').map(Number).filter(n => !isNaN(n) && n > 0 && n <= 10);
+               if (nums.length === 10 && !newRecords.find(nr => nr.period === p)) {
+                 newRecords.push({ period: p, numbers: nums });
+               }
+             }
+          });
+        }
+      }
 
       // JSON PARSER
       let jsonData = null;
@@ -158,12 +179,14 @@ async function terminalSyncAndAnalyze() {
 
       if (newRecords.length > 0) {
         sourceUsed = source.url.includes("168y") ? "wuk-168y" : "api68";
+        console.log(`✅ [Background Sync] Successfully fetched ${newRecords.length} records from ${sourceUsed}`);
         newRecords.forEach(rec => {
           if (!globalLotteryData.find(d => d.period === rec.period)) {
             globalLotteryData.push(rec);
           }
         });
-        break;
+        // If we got good data from 168y, we can stop for this cycle
+        if (source.url.includes("168y")) break;
       }
     } catch (err) {
       console.warn(`[Background Sync] Source failed: ${source.url}`);
@@ -191,24 +214,21 @@ async function terminalSyncAndAnalyze() {
   const curMinutes = bjTime.getMinutes();
   const curSeconds = bjTime.getSeconds();
   
-  // High-Precision Grid Calculation: 04:05, 09:05, 14:05... 59:05
-  // Total seconds from the start of the hour for the current time
   const currentHourSeconds = curMinutes * 60 + curSeconds;
-  
-  // Define targets (in seconds from hour start): 4:05 (245s), 9:05 (545s), etc.
   const targets = [];
   for (let k = 0; k < 12; k++) {
-    targets.push(245 + k * 300);
+    targets.push(245 + k * 300); // 4:05, 9:05...
   }
   
-  // Find the next active terminal sync point
   let nextTargetSeconds = targets.find(t => t > currentHourSeconds);
   if (!nextTargetSeconds) {
-    // Wrap around to the first target of the next hour (04:05)
     nextTargetSeconds = 245 + 3600;
   }
   
   let diffSeconds = nextTargetSeconds - currentHourSeconds;
+  
+  // If we are VERY close to the target or just passed it (within 30s), trigger more aggressive sync
+  // But wait at least 5s after the mark as requested
   
   const mm = Math.floor(diffSeconds / 60);
   const ss = diffSeconds % 60;
@@ -221,11 +241,9 @@ async function terminalSyncAndAnalyze() {
     serverTime: now
   };
 
-  // Run Analysis Engine
+  // Run Analysis Engine only if we have enough data and potentially new data
   if (globalLotteryData.length >= 10) {
-    console.log("🧠 [Analysis Engine] Running evolution model...");
     globalAnalysis = perform3DAnalysis(globalLotteryData);
-    console.log(`✅ [Analysis Engine] Prediction calculated: Number ${globalAnalysis.prediction.number} in ${globalAnalysis.prediction.targetZone}`);
   }
 }
 
@@ -236,8 +254,6 @@ async function startServer() {
   // Analysis API
   app.get("/api/lottery-data", async (req, res) => {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
-    
-    // Return cached global data and analysis
     res.json({ 
       success: true, 
       data: globalLotteryData.slice(0, 150),
@@ -249,13 +265,13 @@ async function startServer() {
     });
   });
 
-  // Trigger initial sync
+  // Initial sync
   terminalSyncAndAnalyze();
   
-  // Set automated interval (10 minutes as requested)
+  // High-frequency sync to ensure data is caught after the 4/9 minute mark (every 30 seconds)
   setInterval(() => {
     terminalSyncAndAnalyze();
-  }, 10 * 60 * 1000);
+  }, 30 * 1000);
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
