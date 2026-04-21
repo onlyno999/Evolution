@@ -1,6 +1,6 @@
 import express from "express";
 import axios from "axios";
-import { perform3DAnalysis } from "../src/lib/analysis.ts";
+import { perform3DAnalysis } from "../src/lib/analysis";
 
 const app = express();
 
