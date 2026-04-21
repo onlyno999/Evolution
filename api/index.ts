@@ -1,22 +1,122 @@
 import express from "express";
 import axios from "axios";
-import { perform3DAnalysis } from "../src/lib/analysis";
+
+// --- Inlined Analysis Logic for Vercel Atomic Deployment ---
+interface LotteryEntry {
+  period: string;
+  numbers: number[];
+}
+
+function calculateNumScore(num: number, history: number[], density: number, isLastRec: boolean): number {
+  if (isLastRec) return -999999;
+  const curPos = history.length > 0 ? history[history.length - 1] : 10;
+  const isValueZone = curPos >= 4 && curPos <= 10;
+  let score = (density / 100);
+  if (!isValueZone) score *= 0.0001; else score *= 2.5;
+  const recent = history.slice(-3);
+  if (recent.some(p => p <= 3)) score *= 0.05;
+  return score;
+}
+
+function perform3DAnalysis(data: LotteryEntry[]) {
+  const numRange = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  if (data.length < 5) return null;
+  const sortedData = [...data].sort((a, b) => Number(a.period) - Number(b.period));
+  const totalPeriods = sortedData.length;
+  const globalPosHistory: Record<number, number[]> = {};
+  numRange.forEach(n => globalPosHistory[n] = []);
+  sortedData.forEach(entry => {
+    entry.numbers.forEach((num, rankIdx) => {
+      if (globalPosHistory[num]) globalPosHistory[num].push(rankIdx + 1);
+    });
+  });
+  const fullSimulationHistory: (boolean | null)[] = [];
+  let lastSimRec: number | null = null;
+  for (let tIdx = 10; tIdx < totalPeriods; tIdx++) {
+    const trainingData = sortedData.slice(0, tIdx);
+    const targetEntry = sortedData[tIdx];
+    const simHistory: Record<number, number[]> = {};
+    const simDensity: Record<number, number> = {};
+    numRange.forEach(n => {
+      const h: number[] = [];
+      trainingData.forEach(e => {
+        const r = e.numbers.indexOf(n);
+        if (r !== -1) h.push(r + 1);
+      });
+      simHistory[n] = h;
+      simDensity[n] = (h.filter(p => p >= 4).length / (h.length || 1)) * 100;
+    });
+    const simRec = numRange.map(n => ({
+      num: n,
+      score: calculateNumScore(n, simHistory[n], simDensity[n], n === lastSimRec)
+    })).sort((a, b) => b.score - a.score)[0]?.num;
+    lastSimRec = simRec;
+    const actualRank = targetEntry.numbers.indexOf(simRec) + 1;
+    fullSimulationHistory.push(actualRank >= 4 && actualRank <= 10);
+  }
+  const displayHitHistory = [...fullSimulationHistory].slice(-20);
+  while (displayHitHistory.length < 20) displayHitHistory.unshift(null);
+
+  const finalCandidates = numRange.map(n => {
+    const history = globalPosHistory[n] || [];
+    const density = (history.filter(p => p >= 4).length / (history.length || 1)) * 100;
+    return { num: n, score: calculateNumScore(n, history, density, n === lastSimRec) };
+  }).sort((a, b) => b.score - a.score);
+
+  const best = finalCandidates[0];
+  const lastSuccess = fullSimulationHistory[fullSimulationHistory.length - 1];
+  const liveRecent = fullSimulationHistory.slice(-5);
+  const liveFailRate = liveRecent.length > 0 ? liveRecent.filter(h => h === false).length / liveRecent.length : 0;
+  let strategy: "Momentum" | "Liquidation-Pivot" | "Value-Capture" = "Value-Capture";
+  if (lastSuccess === false) strategy = "Liquidation-Pivot";
+  else if (liveFailRate < 0.2) strategy = "Momentum";
+
+  return {
+    regressionReport: `进化型分析终端: 已完成 ${totalPeriods} 轮自我进化。DNA链路校准完毕。`,
+    prediction: {
+      number: best.num,
+      targetZone: "核心获利区间 (P04-P10)",
+      confidence: Math.min(Math.round(best.score * 100), 99),
+      strategy,
+      evolutionLevel: Math.floor(totalPeriods / 5) * 1.2
+    },
+    hitHistory: displayHitHistory,
+    stockMarket: numRange.map(num => {
+      const h = globalPosHistory[num];
+      const latest = h[h.length - 1] || 10;
+      const prev = h[h.length - 2] || latest;
+      return {
+        symbol: `$N${num.toString().padStart(2, '0')}`,
+        number: num,
+        currentPrice: latest,
+        change: prev - latest,
+        status: (latest >= 4 && latest <= 10) ? "high" : "low"
+      };
+    }),
+    evolutionMetrics: {
+      learningCycles: totalPeriods * 128,
+      memoryNodes: totalPeriods * 12,
+      optimizationRate: `${(0.99 + (totalPeriods % 100) / 10000).toFixed(4)}%`
+    }
+  };
+}
+// --- End Analysis Logic ---
 
 const app = express();
 
-// 注意：在 Vercel 上为了持久化，建议这里对接 Redis
-// 临时方案（每 5 分钟同步一次，数据存内存会随函数销毁而重置）
 let globalLotteryData: any[] = [];
 let globalAnalysis: any = null;
-
 let lastSyncTime = 0;
 
 async function syncData() {
   const url = "https://wuk.168y.cloudns.org/";
   try {
     const response = await axios.get(`${url}?t=${Date.now()}`, {
-      headers: { "User-Agent": "Mozilla/5.0 Node.js" },
-      timeout: 10000,
+      headers: { 
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Referer": "https://wuk.168y.cloudns.org/"
+      },
+      timeout: 12000,
     });
     const dataStr = typeof response.data === "string" ? response.data : JSON.stringify(response.data);
     const newRecords: any[] = [];
@@ -25,39 +125,41 @@ async function syncData() {
     while ((m = pairRegex.exec(dataStr)) !== null) {
       const p = m[1];
       const r = m[2];
-      const nums = r.split(',').map(Number);
+      const nums = r.split(',').map(Number).filter(n => !isNaN(n) && n >= 1 && n <= 10);
       if (nums.length === 10) newRecords.push({ period: p, numbers: nums });
     }
-    // 合并并排序
-    globalLotteryData = [...newRecords, ...globalLotteryData].slice(0, 200);
-    if (globalLotteryData.length >= 10) {
+    
+    if (newRecords.length > 0) {
+      newRecords.sort((a, b) => Number(b.period) - Number(a.period));
+      globalLotteryData = newRecords.slice(0, 150);
       globalAnalysis = perform3DAnalysis(globalLotteryData);
+      lastSyncTime = Date.now();
+      return { success: true, count: newRecords.length };
     }
-    lastSyncTime = Date.now();
-    return true;
-  } catch (err) {
-    return false;
+    return { success: false, reason: "No records found in HTML content" };
+  } catch (err: any) {
+    return { success: false, reason: err.message };
   }
 }
 
-// 数据接口
 app.get("/api/lottery-data", async (req, res) => {
-  const isStale = Date.now() - lastSyncTime > 5 * 60 * 1000;
+  const isStale = Date.now() - lastSyncTime > 4 * 60 * 1000;
+  let syncResult = null;
   if (globalLotteryData.length === 0 || isStale) {
-    await syncData();
+    syncResult = await syncData();
   }
   res.json({
     success: true,
     data: globalLotteryData,
     analysis: globalAnalysis,
-    lastSyncTime
+    lastSyncTime,
+    syncResult
   });
 });
 
-// 定时任务接口（vercel.json 会调用此接口）
 app.get("/api/sync", async (req, res) => {
-  const success = await syncData();
-  res.json({ success });
+  const result = await syncData();
+  res.json(result);
 });
 
 export default app;
