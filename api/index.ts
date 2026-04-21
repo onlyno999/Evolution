@@ -1,7 +1,12 @@
-import express from "express";
+import type { VercelRequest, VercelResponse } from '@vercel/node';
 import axios from "axios";
 
-// --- Inlined Analysis Logic for Vercel Atomic Deployment ---
+// --- State Management for Serverless Reuse ---
+let globalLotteryData: LotteryEntry[] = [];
+let globalAnalysis: any = null;
+let lastSyncTime = 0;
+
+// --- Inlined Analysis Logic ---
 interface LotteryEntry {
   period: string;
   numbers: number[];
@@ -100,16 +105,8 @@ function perform3DAnalysis(data: LotteryEntry[]) {
     }
   };
 }
-// --- End Analysis Logic ---
-
-const app = express();
-
-let globalLotteryData: any[] = [];
-let globalAnalysis: any = null;
-let lastSyncTime = 0;
 
 async function syncData() {
-  // 采用多源备份策略：如果 primary 失败，尝试备用地址
   const sources = [
     "https://wuk.168y.cloudns.org/",
     "http://wuk.168y.cloudns.org/"
@@ -121,10 +118,9 @@ async function syncData() {
         headers: { 
           "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Mobile/15E148 Safari/604.1",
           "Referer": url,
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Cache-Control": "no-cache"
+          "Accept": "text/html"
         },
-        timeout: 9000, // 缩短超时，快速闪避
+        timeout: 8000,
       });
       
       const dataStr = typeof response.data === "string" ? response.data : JSON.stringify(response.data);
@@ -145,41 +141,33 @@ async function syncData() {
         globalLotteryData = newRecords.slice(0, 150);
         globalAnalysis = perform3DAnalysis(globalLotteryData);
         lastSyncTime = Date.now();
-        console.log("✅ Sync Success from", url);
-        return { success: true, count: newRecords.length };
+        return { success: true };
       }
-    } catch (err: any) {
-      console.warn("⚠️ Source failed:", url, err.message);
-    }
+    } catch (err: any) {}
   }
-  return { success: false, reason: "All sources failed to provide valid data" };
+  return { success: false };
 }
 
-// 路由兼容性处理：同时处理带 /api 前缀和不带前缀的情况
-const router = express.Router();
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
 
-router.get("/lottery-data", async (req, res) => {
-  const isStale = Date.now() - lastSyncTime > 4 * 60 * 1000;
-  let syncResult = null;
-  if (globalLotteryData.length === 0 || isStale) {
-    syncResult = await syncData();
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
   }
-  res.json({
+
+  const isStale = Date.now() - lastSyncTime > 4 * 60 * 1000;
+  if (globalLotteryData.length === 0 || isStale) {
+    await syncData();
+  }
+
+  res.status(200).json({
     success: true,
     data: globalLotteryData,
     analysis: globalAnalysis,
-    lastSyncTime,
-    syncResult
+    lastSyncTime
   });
-});
-
-router.get("/sync", async (req, res) => {
-  const result = await syncData();
-  res.json(result);
-});
-
-// 挂载到两个可能的路径上，增强 Vercel 环境下的路由鲁棒性
-app.use("/api", router);
-app.use("/", router);
-
-export default app;
+}
