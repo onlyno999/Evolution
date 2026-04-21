@@ -142,7 +142,10 @@ async function syncData() {
   }
 }
 
-app.get("/api/lottery-data", async (req, res) => {
+// 路由兼容性处理：同时处理带 /api 前缀和不带前缀的情况
+const router = express.Router();
+
+router.get("/lottery-data", async (req, res) => {
   const isStale = Date.now() - lastSyncTime > 4 * 60 * 1000;
   let syncResult = null;
   if (globalLotteryData.length === 0 || isStale) {
@@ -157,9 +160,13 @@ app.get("/api/lottery-data", async (req, res) => {
   });
 });
 
-app.get("/api/sync", async (req, res) => {
+router.get("/sync", async (req, res) => {
   const result = await syncData();
   res.json(result);
 });
+
+// 挂载到两个可能的路径上，增强 Vercel 环境下的路由鲁棒性
+app.use("/api", router);
+app.use("/", router);
 
 export default app;
