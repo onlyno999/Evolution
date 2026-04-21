@@ -9,6 +9,8 @@ const app = express();
 let globalLotteryData: any[] = [];
 let globalAnalysis: any = null;
 
+let lastSyncTime = 0;
+
 async function syncData() {
   const url = "https://wuk.168y.cloudns.org/";
   try {
@@ -31,6 +33,7 @@ async function syncData() {
     if (globalLotteryData.length >= 10) {
       globalAnalysis = perform3DAnalysis(globalLotteryData);
     }
+    lastSyncTime = Date.now();
     return true;
   } catch (err) {
     return false;
@@ -39,11 +42,15 @@ async function syncData() {
 
 // 数据接口
 app.get("/api/lottery-data", async (req, res) => {
-  if (globalLotteryData.length === 0) await syncData();
+  const isStale = Date.now() - lastSyncTime > 5 * 60 * 1000;
+  if (globalLotteryData.length === 0 || isStale) {
+    await syncData();
+  }
   res.json({
     success: true,
     data: globalLotteryData,
-    analysis: globalAnalysis
+    analysis: globalAnalysis,
+    lastSyncTime
   });
 });
 
