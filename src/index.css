@@ -1,0 +1,142 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Sleek Interface Palette */
+  --color-bg-base: #090b0e;
+  --color-panel: #161a20;
+  --color-border-sleek: #2d343d;
+  --color-accent-sleek: #00ff9d;
+  --color-accent-alt: #ff4e50;
+  --color-text-p: #e0e6ed;
+  --color-text-s: #94a3b8;
+
+  @keyframes marquee {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+  }
+}
+
+.animate-marquee {
+  animation: marquee 40s linear infinite;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-bg-base);
+    background-image: radial-gradient(circle at 50% 50%, #1a1f26 0%, #090b0e 100%);
+    color: var(--color-text-p);
+  }
+}
+
+/* Custom Grid Utility for the Sleek Interface Layout - Mobile First */
+.sleek-grid {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+  background-color: var(--color-bg-base);
+  overflow-y: auto;
+}
+
+@media (min-width: 1024px) {
+  .sleek-grid {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    width: 100vw;
+    background-color: var(--color-bg-base);
+    overflow: hidden;
+  }
+
+  .header { 
+    height: 60px;
+    flex-shrink: 0;
+    width: 100%;
+    border-bottom: 1px solid var(--color-border-sleek);
+  }
+
+  .dashboard-scroll {
+    flex: 1;
+    overflow-y: auto;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background-color: var(--color-bg-base);
+  }
+
+  .dashboard-container {
+    width: 100%;
+    max-width: 1600px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .pc-main-layout {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 24px;
+    width: 100%;
+    align-items: start;
+  }
+
+  .main-chart {
+    height: 600px;
+    width: 100%;
+    background-color: var(--color-panel);
+    border: 1px solid var(--color-border-sleek);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .sidebar {
+    width: 100%;
+    background-color: var(--color-panel);
+    border: 1px solid var(--color-border-sleek);
+    border-radius: 4px;
+    height: auto;
+  }
+
+  .bottom-panel {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+    width: 100%;
+    background-color: var(--color-panel);
+    border: 1px solid var(--color-border-sleek);
+    border-radius: 4px;
+  }
+}
+
+.sleek-panel {
+  background-color: var(--color-panel);
+}
+
+.sleek-border {
+  border-color: var(--color-border-sleek);
+}
+
+/* Prediction Ribbon Effect */
+.prediction-ribbon {
+  position: relative;
+  overflow: hidden;
+}
+
+.prediction-ribbon::after {
+  content: 'LOCKED';
+  position: absolute;
+  top: 10px;
+  right: -25px;
+  background: var(--color-accent-sleek);
+  color: #000;
+  font-size: 10px;
+  font-weight: 900;
+  padding: 2px 30px;
+  transform: rotate(45deg);
+}
