@@ -328,11 +328,11 @@ export default function App() {
            <div className="grid grid-cols-2 gap-4 font-mono">
               <div className="flex flex-col">
                 <span className="text-[8px] text-white/40 uppercase">Evo_Level</span>
-                <span className="text-[12px] text-[#00ff9d] font-bold">LV.{analysis?.prediction.evolutionLevel.toFixed(1)}</span>
+                <span className="text-[12px] text-[#00ff9d] font-bold">LV.{analysis?.prediction?.evolutionLevel?.toFixed(1) ?? "0.0"}</span>
               </div>
               <div className="flex flex-col">
                 <span className="text-[8px] text-white/40 uppercase">Opt_Rate</span>
-                <span className="text-[12px] text-[#00ff9d] font-bold">{analysis?.evolutionMetrics?.optimizationRate}</span>
+                <span className="text-[12px] text-[#00ff9d] font-bold">{analysis?.evolutionMetrics?.optimizationRate ?? "99.00%"}</span>
               </div>
            </div>
         </section>
