@@ -140,8 +140,10 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
   const recHistory: number[] = [];
   const geneHistoryLogs: { period: string; leader: string; results: Record<string, { num: number; rank: number }> }[] = [];
   
-  // 核心变更：为了让分数“看起来统一”，我们只对最近 20 期进行积分实战模拟
-  const walkStartIdx = Math.max(5, totalPeriods - 20); 
+  // 深度演化固化：将模拟深度从 20 期提升到 100 期
+  // 这样在计算最近 20 期红绿灯时，各基因已经有了 80 期的积分底蕴，霸主地位更稳固
+  // 历史接力记录（谁在那一期当班）就不会因为单次的换届而产生蝴蝶效应
+  const walkStartIdx = Math.max(5, totalPeriods - 100); 
 
   for (let tIdx = walkStartIdx; tIdx < totalPeriods; tIdx++) {
     const trainingData = sortedData.slice(0, tIdx);
