@@ -125,105 +125,23 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
     });
   });
 
-  // 1. Backtest ALL Chromosomes to find the current ALPHA gene
+  // 1. Walk-Forward Simulation and Genetic Evolution
   const winnerHistory: Record<string, number> = {};
-  const geneOverallLastRec: Record<string, number | null> = {};
-  
+  const geneOverallLastRec: Record<string, number> = {};
   CHROMOSOMES.forEach(c => {
-    winnerHistory[c.name] = 0;
-    geneOverallLastRec[c.name] = null;
+    winnerHistory[c.name] = 5.0; // Start with baseline "trust"
+    geneOverallLastRec[c.name] = -1;
   });
 
-  // We look back at the last 10 periods to see which gene would have survived
-  const backtestWindow = 10;
-  for (let tIdx = Math.max(10, totalPeriods - backtestWindow); tIdx < totalPeriods; tIdx++) {
-    const testData = sortedData.slice(0, tIdx);
-    const targetEntry = sortedData[tIdx];
-
-    const simHistoryMap: Record<number, number[]> = {};
-    const simDensityMap: Record<number, number> = {};
-    numRange.forEach(n => {
-      const h: number[] = [];
-      testData.forEach(e => {
-        const r = e.numbers.indexOf(n);
-        if (r !== -1) h.push(r + 1);
-      });
-      simHistoryMap[n] = h;
-      simDensityMap[n] = (h.filter(p => p >= 4).length / (h.length || 1)) * 100;
-    });
-
-    // DRAFT SYSTEM: Rank genes by current winnerHistory and let them pick UNIQELY
-    const takenInRound = new Set<number>();
-    const roundOrder = CHROMOSOMES.sort((a,b) => winnerHistory[b.name] - winnerHistory[a.name]);
-
-    roundOrder.forEach(gene => {
-      const candidates = numRange.map(n => ({
-        num: n,
-        score: calculateGeneticScore(n, simHistoryMap[n], simDensityMap[n], gene, n === geneOverallLastRec[gene.name])
-      })).sort((a, b) => b.score - a.score);
-
-      // Pick the best AVAILABLE number for this gene's logic
-      let bestForGene = candidates[0].num;
-      for (const cand of candidates) {
-        if (!takenInRound.has(cand.num)) {
-          bestForGene = cand.num;
-          break;
-        }
-      }
-
-      geneOverallLastRec[gene.name] = bestForGene; 
-      takenInRound.add(bestForGene);
-      
-      const rank = targetEntry.numbers.indexOf(bestForGene) + 1;
-      const isLatest = tIdx === totalPeriods - 1;
-      let scoreDelta = 0;
-
-      if (rank >= 1 && rank <= 3) {
-        // ABSOLUTE FAILURE: Hit the red zone
-        scoreDelta = isLatest ? -1.2 : -0.4; // Softened penalty to prevent score wipeout
-      } else if (rank >= 4 && rank <= 10) {
-        // SUCCESS: In the profit zone, but now check specialization
-        const pref = gene.weights.zonePreference;
-        const isBullseye = (pref === 1 && rank >= 4 && rank <= 6) || 
-                          (pref === 2 && rank >= 6 && rank <= 8) || 
-                          (pref === 3 && rank >= 7 && rank <= 9) || 
-                          (pref === 4 && rank >= 8 && rank <= 10);
-        
-        if (isBullseye) {
-          scoreDelta = isLatest ? 1.5 : 0.8; // Reward for precision
-        } else {
-          scoreDelta = isLatest ? 0.6 : 0.4; // Reward for survival (keeps progress steady)
-        }
-      }
-
-      winnerHistory[gene.name] += scoreDelta;
-    });
-  }
-
-  // Normalize scores to integer-like display for UI (0-10 scale)
-  const normalizedGenePulse: Record<string, number> = {};
-  CHROMOSOMES.forEach(c => {
-    normalizedGenePulse[c.name] = Math.max(0, Math.min(10, Math.round(winnerHistory[c.name])));
-  });
-
-  const currentAlphaOrder = CHROMOSOMES.sort((a, b) => winnerHistory[b.name] - winnerHistory[a.name]);
-  const alphaGene = currentAlphaOrder[0];
-
-  // 2. Main Simulation Loop (This drives the global stats)
-  // ... (stays same but using the alpha gene for the primary system prediction)
-
-  // 2. Main Simulation Loop (using weighted DNA based on the Alpha Gene)
-  const fullSimulationHistory: (boolean | null)[] = [];
-  const recHistory: number[] = []; 
+  const fullSimulationHistory: boolean[] = [];
   const predictionHistory: Record<string, number> = {};
+  const recHistory: number[] = [];
   const startSimIdx = 10; 
-  let lastSimRec: number | null = null; 
 
   for (let tIdx = startSimIdx; tIdx < totalPeriods; tIdx++) {
     const trainingData = sortedData.slice(0, tIdx);
     const targetEntry = sortedData[tIdx];
-    
-    // Use the draft system for simulation as well to be consistent
+
     const simHistoryMap: Record<number, number[]> = {};
     const simDensityMap: Record<number, number> = {};
     numRange.forEach(n => {
@@ -236,57 +154,152 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
       simDensityMap[n] = (h.filter(p => p >= 4).length / (h.length || 1)) * 100;
     });
 
-    const simCandidates = numRange.map(n => ({
-      num: n,
-      score: calculateGeneticScore(n, simHistoryMap[n], simDensityMap[n], alphaGene, n === lastSimRec)
-    })).sort((a, b) => b.score - a.score);
+    // A. Identify the LEADER at this specific moment in history
+    const currentLeadership = [...CHROMOSOMES].sort((a,b) => winnerHistory[b.name] - winnerHistory[a.name]);
+    const alphaAtThisMoment = currentLeadership[0];
 
-    const simRec = simCandidates[0]?.num;
-    lastSimRec = simRec; 
-    recHistory.push(simRec);
-    predictionHistory[targetEntry.period] = simRec;
+    // B. Re-calculate scores for the leader to get the system's official choice for this period
+    const alphaCandidates = numRange.map(n => {
+        const lastRec = recHistory.length > 0 ? recHistory[recHistory.length - 1] : null;
+        return {
+            num: n,
+            score: calculateGeneticScore(n, simHistoryMap[n], simDensityMap[n], alphaAtThisMoment, n === lastRec)
+        };
+    }).sort((a, b) => b.score - a.score);
+    
+    const systemChoice = alphaCandidates[0].num;
+    predictionHistory[targetEntry.period] = systemChoice;
+    
+    const systemRank = targetEntry.numbers.indexOf(systemChoice) + 1;
+    // 只有主推号进入 P4-P10 才亮绿灯
+    const isHit = systemRank >= 4 && systemRank <= 10;
+    fullSimulationHistory.push(isHit);
+    recHistory.push(systemChoice);
 
-    const actualRank = targetEntry.numbers.indexOf(simRec) + 1;
-    fullSimulationHistory.push(actualRank >= 4 && actualRank <= 10);
+    // C. 核心：四大基因“责任区”演化考核
+    const takenInRound = new Set<number>();
+    currentLeadership.forEach(gene => {
+      const candidates = numRange.map(n => ({
+        num: n,
+        score: calculateGeneticScore(n, simHistoryMap[n], (simHistoryMap[n].filter(p => p >= 4).length / (simHistoryMap[n].length || 1)) * 100, gene, false)
+      })).sort((a, b) => b.score - a.score);
+
+      let bestForGene = candidates[0].num;
+      for (const cand of candidates) {
+        if (!takenInRound.has(cand.num)) {
+          bestForGene = cand.num;
+          break;
+        }
+      }
+      geneOverallLastRec[gene.name] = bestForGene; 
+      takenInRound.add(bestForGene);
+      
+      const rank = targetEntry.numbers.indexOf(bestForGene) + 1;
+      const isLatest = tIdx === totalPeriods - 1;
+      let scoreDelta = 0;
+
+      // 判定逻辑：必须落在自己的“责任区”才算满分，落在其他盈利区算生存，落在红区大减分
+      const pref = gene.weights.zonePreference;
+      const isBullseye = (pref === 1 && rank >= 4 && rank <= 6) || 
+                        (pref === 2 && rank >= 6 && rank <= 8) || 
+                        (pref === 3 && rank >= 7 && rank <= 9) || 
+                        (pref === 4 && rank >= 8 && rank <= 10);
+
+      if (rank >= 1 && rank <= 3) {
+        scoreDelta = isLatest ? -4.0 : -2.5; // 红区处罚加剧
+      } else if (isBullseye) {
+        scoreDelta = isLatest ? 3.0 : 2.0; // 责任区命中奖励
+      } else if (rank >= 4 && rank <= 10) {
+        scoreDelta = isLatest ? 1.0 : 0.5; // 存活奖（非责任区但盈利）
+      }
+      
+      winnerHistory[gene.name] += scoreDelta;
+    });
   }
 
-  // 3. Final Hit History Construction
-  // fullSimulationHistory Index Map:
-  // [0] = result for sortedData[10]
-  // [totalLength - 1] = result for sortedData[totalLength - 1] (which is the last finished period)
-  const displayHitHistory = [...fullSimulationHistory].slice(-20);
-  // ... (rest remains consistent but uses alphaGene and its metrics)
+  // 2. Final Output Construction (UI 坑位分值：基于近期“责任区”命中率的动态脉冲)
+  const normalizedGenePulse: Record<string, number> = {};
+  const pulseWindow = 12;
+  const zoneHits: Record<string, number> = {};
   
-  // 4. Final Recommendation using the Alpha Strategy
-  const latestRecent = fullSimulationHistory.filter(h => h !== null).slice(-10);
-  const redStreak = displayHitHistory.reverse().findIndex(h => h !== false); 
-  displayHitHistory.reverse(); // put back
+  CHROMOSOMES.forEach(c => zoneHits[c.name] = 0);
 
+  const pulseStartIdx = Math.max(startSimIdx, totalPeriods - pulseWindow);
+  for (let tIdx = pulseStartIdx; tIdx < totalPeriods; tIdx++) {
+    const targetEntry = sortedData[tIdx];
+    const trainingData = sortedData.slice(0, tIdx);
+    
+    // 获取当期各基因的预测号（复真当时状态）
+    const simHistoryMap: Record<number, number[]> = {};
+    numRange.forEach(n => {
+      const h: number[] = [];
+      trainingData.forEach(e => {
+        const r = e.numbers.indexOf(n);
+        if (r !== -1) h.push(r + 1);
+      });
+      simHistoryMap[n] = h;
+    });
+
+    const takenInRound = new Set<number>();
+    const roundOrder = [...CHROMOSOMES].sort((a,b) => winnerHistory[b.name] - winnerHistory[a.name]);
+
+    roundOrder.forEach(gene => {
+      const candidates = numRange.map(n => ({
+        num: n,
+        score: calculateGeneticScore(n, simHistoryMap[n], (simHistoryMap[n].filter(p => p >= 4).length / (simHistoryMap[n].length || 1)) * 100, gene, false)
+      })).sort((a, b) => b.score - a.score);
+
+      let bestForGene = candidates[0].num;
+      for (const cand of candidates) {
+        if (!takenInRound.has(cand.num)) {
+          bestForGene = cand.num;
+          break;
+        }
+      }
+      takenInRound.add(bestForGene);
+      const rank = targetEntry.numbers.indexOf(bestForGene) + 1;
+      const pref = gene.weights.zonePreference;
+      const isBullseye = (pref === 1 && rank >= 4 && rank <= 6) || 
+                        (pref === 2 && rank >= 6 && rank <= 8) || 
+                        (pref === 3 && rank >= 7 && rank <= 9) || 
+                        (pref === 4 && rank >= 8 && rank <= 10);
+      
+      if (isBullseye) zoneHits[gene.name]++;
+    });
+  }
+
+  CHROMOSOMES.forEach(c => {
+    // 坑位分数 = (近期责任区命中数 / 窗口期) * 10
+    const hitRate = zoneHits[c.name] / pulseWindow;
+    normalizedGenePulse[c.name] = Math.max(1, Math.min(10, Math.round(hitRate * 10 + 2))); // 基础分2分，随命中率波动
+  });
+
+  const finalLeadership = [...CHROMOSOMES].sort((a, b) => winnerHistory[b.name] - winnerHistory[a.name]);
+  const finalAlpha = finalLeadership[0];
+  const displayHitHistory = [...fullSimulationHistory].slice(-20);
+  const redStreak = [...displayHitHistory].reverse().findIndex(h => h !== false); 
+  
   const liveCandidates = numRange.map(n => {
     const history = globalPosHistory[n] || [];
     const density = (history.filter(p => p >= 4).length / (history.length || 1)) * 100;
-    
-    let chasingPenalty = 1.0;
-    for (let i = 1; i <= 3; i++) {
-      const pIdx = fullSimulationHistory.length - i;
-      if (pIdx >= 0 && recHistory[pIdx] === n && fullSimulationHistory[pIdx] === false) chasingPenalty *= 0.01;
-    }
-
+    const lastRec = recHistory.length > 0 ? recHistory[recHistory.length - 1] : null;
     return {
       num: n,
-      score: calculateGeneticScore(n, history, density, alphaGene, n === lastSimRec) * chasingPenalty
+      score: calculateGeneticScore(n, history, density, finalAlpha, n === lastRec)
     };
   }).sort((a, b) => b.score - a.score);
+
+  const bestRec = liveCandidates[0].num;
 
   const genePredictions: Record<string, number> = {};
   const currentTaken = new Set<number>();
   
-  // Use the pre-calculated Alpha Order to let genes pick uniquely
-  currentAlphaOrder.forEach(gene => {
+  finalLeadership.forEach(gene => {
     const candidates = numRange.map(n => {
         const h = globalPosHistory[n] || [];
         const d = (h.filter(p => p >= 4).length / (h.length || 1)) * 100;
-        return { num: n, score: calculateGeneticScore(n, h, d, gene, n === lastSimRec) };
+        const lastRec = recHistory.length > 0 ? recHistory[recHistory.length - 1] : null;
+        return { num: n, score: calculateGeneticScore(n, h, d, gene, n === lastRec) };
     }).sort((a, b) => b.score - a.score);
     
     let bestUnique = candidates[0].num;
@@ -300,28 +313,27 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
     currentTaken.add(bestUnique);
   });
 
-  const bestRec = genePredictions[alphaGene.name];
-
   return {
-    regressionReport: `遗传算法已激活：当前最优基因集 [${alphaGene.name}]。已回溯近10期胜率，强制切换逻辑分支以绕过红点敏感区。`,
-    // ... mapped to the result format
+    regressionReport: `遗传算法已激活：当前最优基因集 [${finalAlpha.name}]。已回溯分析${totalPeriods}期，并根据各基因共振频率完成${CHROMOSOMES.length}重路径重构。`,
+    consecutiveNumbers: [], 
+    positionDensity: {},
     prediction: {
       number: bestRec,
-      targetZone: `逻辑基因: ${alphaGene.name}`,
+      targetZone: `逻辑基因: ${finalAlpha.name}`,
       confidence: Math.min(Math.round(liveCandidates[0].score * 80), 99),
-      strategy: alphaGene.name as any,
+      strategy: finalAlpha.name,
       evolutionLevel: (totalPeriods / 5) * 1.2 + (redStreak === -1 ? 20 * 50 : (redStreak * 50)),
-      version: `V${Math.floor(totalPeriods/10)}.${alphaGene.name.slice(0,2)}`
+      version: `V${Math.floor(totalPeriods/10)}.${finalAlpha.name.slice(0,2)}`
     },
     hitHistory: displayHitHistory,
     predictionHistory: predictionHistory,
     stockMarket: numRange.map(n => ({
       symbol: `$N${n.toString().padStart(2, '0')}`,
       number: n,
-      currentPrice: globalPosHistory[n][globalPosHistory[n].length - 1],
+      currentPrice: globalPosHistory[n][globalPosHistory[n].length - 1] || 0,
       change: 0,
       changePercent: "0%",
-      status: "high",
+      status: (globalPosHistory[n][globalPosHistory[n].length - 1] || 0) >= 4 ? "high" : "low",
       volatility: 0
     })),
     kLineData: sortedData.slice(-30).map(e => {

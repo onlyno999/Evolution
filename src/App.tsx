@@ -264,7 +264,7 @@ export default function App() {
     
     // 2. Pure UI Logic: Combine current results with cloud overrides
     try {
-      const storageKey = "evolution_history_v2";
+      const storageKey = "evolution_history_v3";
       const saved = localStorage.getItem(storageKey);
       const localHistoryMap: Record<string, boolean> = saved ? JSON.parse(saved) : {};
       
@@ -275,9 +275,9 @@ export default function App() {
       // result.hitHistory is [oldest ... newest] where newest is the last FINISHED period
       const finalizedHistory = result.hitHistory.map((h, i) => {
         // Find corresponding data period for this hit
-        // The last finished period is data[1] (since data[0] is current/active)
+        // In the 'data' array, data[0] is the newest finished period
         const reverseIdx = result.hitHistory.length - 1 - i;
-        const dataIdx = reverseIdx + 1; // data[1] is the newest hit
+        const dataIdx = reverseIdx; // FIXED: data[0] is the newest hit
         
         if (dataIdx >= 0 && dataIdx < data.length) {
           const p = data[dataIdx].period;
@@ -319,7 +319,7 @@ export default function App() {
     if (!analysis || data.length === 0) return;
 
     try {
-      const storageKey = "evolution_history_v2";
+      const storageKey = "evolution_history_v3";
       const saved = localStorage.getItem(storageKey);
       const localHistoryMap: Record<string, boolean> = saved ? JSON.parse(saved) : {};
       
@@ -328,7 +328,8 @@ export default function App() {
 
       // Detect if we have new results that need to be broadcast to cloud
       analysis.hitHistory.forEach((h, i) => {
-        const dataIdx = 19 - i;
+        const reverseIdx = analysis.hitHistory.length - 1 - i;
+        const dataIdx = reverseIdx; 
         if (dataIdx >= 0 && dataIdx < data.length) {
           const p = data[dataIdx].period;
           // IMPORTANT: Use the actual number predicted for THIS past period during simulation
@@ -546,9 +547,17 @@ export default function App() {
             基因链共振 (Gene Pulse)
           </h2>
           <div className="grid grid-cols-2 gap-2">
-            {Object.entries(analysis?.genePulse || {}).map(([name, score]) => {
+            {Object.entries(analysis?.genePulse || {}).map(([name, rawScore]) => {
+              const score = Number(rawScore);
               const isAlpha = analysis?.prediction.strategy === name;
               const predictedNum = analysis?.genePredictions?.[name];
+              
+              const zoneMap: Record<string, string> = {
+                "Rapid-Rebound": "P4-P6",
+                "Stable-Trend": "P6-P8",
+                "Alpha-Centrist": "P7-P9",
+                "Aggressive-Deep": "P8-P10"
+              };
 
               return (
                 <div key={name} className={cn(
@@ -557,10 +566,13 @@ export default function App() {
                 )}>
                   <div className="flex justify-between items-center mb-1.5">
                     <div className="flex items-center gap-1.5">
-                      <span className={cn(
-                        "text-[8px] font-bold uppercase",
-                        isAlpha ? "text-[#00ff9d]" : "text-white/40"
-                      )}>{name}</span>
+                      <div className="flex flex-col">
+                        <span className={cn(
+                          "text-[8px] font-bold uppercase",
+                          isAlpha ? "text-[#00ff9d]" : "text-white/40"
+                        )}>{name}</span>
+                        <span className="text-[7px] text-white/30 font-mono tracking-wider">{zoneMap[name]}</span>
+                      </div>
                       {predictedNum && (
                         <span className="px-1 py-0.5 rounded bg-white/5 text-[9px] font-mono font-bold text-white border border-white/10 leading-none">
                           #{predictedNum}
