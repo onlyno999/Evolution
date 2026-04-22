@@ -30,6 +30,16 @@ import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
 import { perform3DAnalysis, type LotteryEntry, type AnalysisResult } from "./lib/analysis";
+import { 
+  fetchHitHistoryFromCloud, 
+  syncHitHistoryToCloud, 
+  updateLiveStatus, 
+  getLiveStatus,
+  ensureAuth,
+  subscribeToLiveStatus,
+  subscribeToHitHistory,
+  SharedHit
+} from "./lib/firebase";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -134,6 +144,44 @@ export default function App() {
   }, [targetTime, timeOffset]);
 
   const [backendAnalysis, setBackendAnalysis] = useState<AnalysisResult | null>(null);
+  const [cloudHits, setCloudHits] = useState<Record<string, boolean>>({});
+  const [cloudPrediction, setCloudPrediction] = useState<{ period: string, prediction: any } | null>(null);
+
+  useEffect(() => {
+    let unsubLive: (() => void) | null = null;
+    let unsubHits: (() => void) | null = null;
+
+    const initCloud = async () => {
+      try {
+        await ensureAuth();
+        
+        // 1. Subscribe to Historical Consensus (Real-time history sync)
+        unsubHits = subscribeToHitHistory((history) => {
+          const map: Record<string, boolean> = {};
+          history.forEach(h => map[h.period] = h.isHit);
+          setCloudHits(map);
+          setSyncStatus(prev => ({ source: "Cloud", count: Object.keys(map).length }));
+        });
+
+        // 2. Subscribe to Live Consensus (Master Number sync)
+        unsubLive = subscribeToLiveStatus((data) => {
+          if (data && data.prediction) {
+            setCloudPrediction({
+              period: data.period,
+              prediction: data.prediction
+            });
+          }
+        });
+      } catch (e) {
+        console.error("Cloud Synchro Failure:", e);
+      }
+    };
+    initCloud();
+    return () => {
+      unsubLive?.();
+      unsubHits?.();
+    };
+  }, [data.length]);
 
   const fetchLotteryData = async (silent = false) => {
     if (isRefreshing) return; 
@@ -192,19 +240,15 @@ export default function App() {
     // Dual-Layer Sync Architecture
     const schedule = setInterval(() => {
       const nowSynced = Date.now() + timeOffset;
-      const target = targetTime || 0;
-      const isPastTarget = nowSynced >= target;
-      const now = new Date();
-      const seconds = now.getSeconds();
-      const minutes = now.getMinutes();
+      const syncedDate = new Date(nowSynced);
       
-      // 1. High-Frequency Tracking: Retries every 10 seconds past target until new data arrives
-      if (isPastTarget && seconds % 10 === 0) {
-        fetchLotteryData(true);
-      }
-
-      // 2. Heartbeat Pulse: Mandatory refresh every 2 minutes as a safety net
-      if (minutes % 2 === 0 && seconds === 30 && !isPastTarget) {
+      const minutes = syncedDate.getMinutes();
+      const seconds = syncedDate.getSeconds();
+      
+      // EXCLUSIVE SYNC WINDOW: Only refresh at X4:50 and X9:50
+      // This prevents server overload and client-side instability
+      if (minutes % 5 === 4 && seconds === 50) {
+        console.log(`[Scheduled Sync] Running at ${syncedDate.toLocaleTimeString()}`);
         fetchLotteryData(true);
       }
     }, 1000);
@@ -213,10 +257,49 @@ export default function App() {
   }, [targetTime, timeOffset]);
 
   const analysis = useMemo(() => {
-    if (backendAnalysis) return backendAnalysis;
     if (data.length === 0) return null;
-    return perform3DAnalysis(data);
-  }, [backendAnalysis, data]);
+    
+    // 1. Get temporary simulated analysis
+    const result = perform3DAnalysis(data);
+    
+    // 2. Pure UI Logic: Combine current results with cloud overrides
+    try {
+      const storageKey = "evolution_history_v2";
+      const saved = localStorage.getItem(storageKey);
+      const localHistoryMap: Record<string, boolean> = saved ? JSON.parse(saved) : {};
+      
+      // Combine with cloud data (Cloud has priority)
+      const combinedHistoryMap = { ...localHistoryMap, ...cloudHits };
+      
+      // Restore the "Consensus" History for UI display
+      const finalizedHistory = result.hitHistory.map((h, i) => {
+        const dataIdx = 19 - i;
+        if (dataIdx >= 0 && dataIdx < data.length) {
+          const p = data[dataIdx].period;
+          return combinedHistoryMap[p] !== undefined ? combinedHistoryMap[p] : h;
+        }
+        return h;
+      });
+
+      result.hitHistory = finalizedHistory;
+
+      // 3. Consensus Override: Use cloud prediction if same period
+      const currentPeriod = data[0]?.period;
+      if (cloudPrediction && cloudPrediction.period === currentPeriod) {
+        result.prediction = cloudPrediction.prediction;
+        if (cloudPrediction.resonanceData) {
+          result.genePulse = cloudPrediction.resonanceData;
+        }
+        if (cloudPrediction.evolutionMetadata) {
+          result.evolutionMetrics = cloudPrediction.evolutionMetadata;
+        }
+      }
+    } catch (e) {
+      console.warn("Resonance Convergence Failure:", e);
+    }
+    
+    return result;
+  }, [data, cloudHits, cloudPrediction]);
 
   // Auto-select the recommended number when analysis updates
   useEffect(() => {
@@ -224,6 +307,55 @@ export default function App() {
       setSelectedNum(analysis.prediction.number);
     }
   }, [analysis?.prediction.number]);
+
+  // Handle Cloud Data Persistence Side-effects (Moved after analysis declaration)
+  useEffect(() => {
+    if (!analysis || data.length === 0) return;
+
+    try {
+      const storageKey = "evolution_history_v2";
+      const saved = localStorage.getItem(storageKey);
+      const localHistoryMap: Record<string, boolean> = saved ? JSON.parse(saved) : {};
+      
+      const newHitsForCloud: SharedHit[] = [];
+      let hasUpdate = false;
+
+      // Detect if we have new results that need to be broadcast to cloud
+      analysis.hitHistory.forEach((h, i) => {
+        const dataIdx = 19 - i;
+        if (dataIdx >= 0 && dataIdx < data.length) {
+          const p = data[dataIdx].period;
+          if (cloudHits[p] === undefined && h !== null && localHistoryMap[p] === undefined) {
+             localHistoryMap[p] = h;
+             newHitsForCloud.push({
+               period: p,
+               isHit: h,
+               number: analysis.prediction.number,
+               strategy: analysis.prediction.strategy,
+               timestamp: new Date().toISOString()
+             });
+             hasUpdate = true;
+          }
+        }
+      });
+
+      if (hasUpdate) {
+        localStorage.setItem(storageKey, JSON.stringify(localHistoryMap));
+        syncHitHistoryToCloud(newHitsForCloud).catch(console.error);
+        
+        // Always push current prediction to cloud if it's the latest (including Pulse resonance)
+        // Add fallbacks to ensure Firestore doesn't receive 'undefined'
+        updateLiveStatus(
+          data[0].period, 
+          analysis.prediction || {}, 
+          analysis.evolutionMetrics || {}, 
+          analysis.genePulse || {}
+        ).catch(console.error);
+      }
+    } catch (e) {
+      console.warn("Cloud Sync Execution Failure:", e);
+    }
+  }, [analysis?.prediction.number, data.length, cloudHits]);
 
   // Initial loading state or critical data missing
   if (loading && data.length === 0) {
@@ -251,14 +383,20 @@ export default function App() {
             </h1>
           </div>
           <div className="flex flex-col items-start gap-1">
-            <span className={cn(
-              "status-badge px-2 py-1 border text-[9px] sm:text-[10px] font-mono rounded uppercase transition-colors duration-500",
-              syncStatus?.source === 'live' 
-                ? "bg-[#00ff9d]/10 text-[#00ff9d] border-[#00ff9d]/20" 
-                : "bg-amber-500/10 text-amber-500 border-amber-500/20"
-            )}>
-              {syncStatus?.source === 'live' ? 'Evolution Engine Live' : 'AI Cluster Learning...'}
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span className={cn(
+                "status-badge px-2 py-1 border text-[9px] sm:text-[10px] font-mono rounded uppercase transition-colors duration-500",
+                syncStatus?.source === 'live' 
+                  ? "bg-[#00ff9d]/10 text-[#00ff9d] border-[#00ff9d]/20" 
+                  : "bg-amber-500/10 text-amber-500 border-amber-500/20"
+              )}>
+                {syncStatus?.source === 'live' ? 'Evolution Engine Live' : 'AI Cluster Learning...'}
+              </span>
+              <span className="flex items-center gap-1 px-1.5 py-0.5 bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded text-[8px] font-bold uppercase animate-pulse">
+                <Target className="w-2.5 h-2.5" />
+                Global Consensus Active
+              </span>
+            </div>
             {isRefreshing && (
               <RefreshCw className="w-2 h-2 text-[#00ff9d] animate-spin ml-2" />
             )}
@@ -320,19 +458,58 @@ export default function App() {
           <div className="pc-main-layout">
       <aside className="sidebar sleek-panel p-4 lg:p-5 overflow-y-auto flex flex-col gap-6 lg:h-full">
         {/* Evolutionary Status */}
-        <section className="p-4 bg-[#00ff9d]/5 border border-[#00ff9d]/10 rounded mb-2">
-           <div className="flex items-center gap-2 mb-3">
-             <Zap className="w-3 h-3 text-[#00ff9d]" />
-             <span className="text-[10px] text-[#00ff9d] font-black uppercase tracking-widest">Infinite learning Active</span>
+        <section className={cn(
+          "p-4 border rounded mb-2 transition-all duration-500",
+          analysis?.prediction?.strategy === "INSTANT-RESCUE" 
+            ? "bg-[#ff4e50]/10 border-[#ff4e50]/30 animate-pulse" 
+            : "bg-[#00ff9d]/5 border-[#00ff9d]/10"
+        )}>
+           <div className="flex items-center justify-between mb-3">
+             <div className="flex items-center gap-2">
+               <Zap className={cn("w-3 h-3", analysis?.prediction?.strategy === "INSTANT-RESCUE" ? "text-[#ff4e50]" : "text-[#00ff9d]")} />
+               <span className={cn(
+                 "text-[10px] font-black uppercase tracking-widest",
+                 analysis?.prediction?.strategy === "INSTANT-RESCUE" ? "text-[#ff4e50]" : "text-[#00ff9d]"
+               )}>
+                 {analysis?.prediction?.strategy === "INSTANT-RESCUE" ? "Instant Rescue Active" : "Infinite learning Active"}
+               </span>
+             </div>
+             <span className="text-[9px] font-black font-mono text-white/60 bg-white/5 px-1.5 py-0.5 rounded border border-white/10">
+               {analysis?.prediction?.version ?? "V1.0.0"}
+             </span>
            </div>
            <div className="grid grid-cols-2 gap-4 font-mono">
               <div className="flex flex-col">
-                <span className="text-[8px] text-white/40 uppercase">Evo_Level</span>
-                <span className="text-[12px] text-[#00ff9d] font-bold">LV.{analysis?.prediction?.evolutionLevel?.toFixed(1) ?? "0.0"}</span>
+                <span className="text-[8px] text-white/40 uppercase">Evolution Level</span>
+                <span className={cn(
+                  "text-[12px] font-bold",
+                  analysis?.prediction?.strategy === "INSTANT-RESCUE" ? "text-[#ff4e50]" : "text-[#00ff9d]"
+                )}>LV.{analysis?.prediction?.evolutionLevel?.toFixed(1) ?? "0.0"}</span>
               </div>
+              <div className="flex flex-col items-end relative">
+                <span className="text-[8px] text-white/40 uppercase">Evo_Version</span>
+                <div className="flex items-center gap-1.5">
+                  <motion.div 
+                    animate={{ scale: [1, 1.2, 1], opacity: [1, 0.5, 1] }}
+                    transition={{ duration: 2, repeat: Infinity }}
+                    className="w-1 h-1 rounded-full bg-[#00ff9d]"
+                  />
+                  <span className={cn(
+                    "text-[12px] font-black",
+                    (analysis?.prediction.evolutionLevel || 0) > 200 ? "text-[#ff4e50]" : "text-[#00ff9d]"
+                  )}>{analysis?.prediction?.version ?? "V1.0.0"}</span>
+                </div>
+                <span className="text-[6px] text-[#00ff9d]/60 uppercase font-bold tracking-tighter absolute -bottom-2">Live Evolving</span>
+              </div>
+           </div>
+           <div className="grid grid-cols-2 gap-4 font-mono mt-3 pt-3 border-t border-white/5">
               <div className="flex flex-col">
                 <span className="text-[8px] text-white/40 uppercase">Opt_Rate</span>
                 <span className="text-[12px] text-[#00ff9d] font-bold">{analysis?.evolutionMetrics?.optimizationRate ?? "99.00%"}</span>
+              </div>
+              <div className="flex flex-col items-end">
+                <span className="text-[8px] text-white/40 uppercase">Neural_Link</span>
+                <span className="text-[10px] text-[#00ff9d] font-bold uppercase">Active</span>
               </div>
            </div>
         </section>
@@ -354,6 +531,50 @@ export default function App() {
             </div>
           </div>
         </button>
+
+        <section>
+          <h2 className="text-[11px] uppercase tracking-[1px] text-[#94a3b8] mb-4 border-l-2 border-[#3b82f6] pl-2 font-bold">
+            基因链共振 (Gene Pulse)
+          </h2>
+          <div className="grid grid-cols-2 gap-2">
+            {Object.entries(analysis?.genePulse || {}).map(([name, score]) => {
+              const isAlpha = analysis?.prediction.strategy === name;
+              const predictedNum = analysis?.genePredictions?.[name];
+
+              return (
+                <div key={name} className={cn(
+                  "p-2 border rounded transition-all duration-300",
+                  isAlpha ? "bg-[#00ff9d]/10 border-[#00ff9d]/30" : "bg-black/40 border-white/5"
+                )}>
+                  <div className="flex justify-between items-center mb-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className={cn(
+                        "text-[8px] font-bold uppercase",
+                        isAlpha ? "text-[#00ff9d]" : "text-white/40"
+                      )}>{name}</span>
+                      {predictedNum && (
+                        <span className="px-1 py-0.5 rounded bg-white/5 text-[9px] font-mono font-bold text-white border border-white/10 leading-none">
+                          #{predictedNum}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[9px] font-mono text-white/60">{score}/10</span>
+                  </div>
+                  <div className="h-1 bg-white/5 rounded-full overflow-hidden">
+                    <motion.div 
+                      initial={{ width: 0 }}
+                      animate={{ width: `${(score / 10) * 100}%` }}
+                      className={cn(
+                        "h-full transition-all duration-1000",
+                        isAlpha ? "bg-[#00ff9d]" : "bg-[#3b82f6]/40"
+                      )}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
 
         <section>
           <h2 className="text-[11px] uppercase tracking-[1px] text-[#94a3b8] mb-4 border-l-2 border-[#00ff9d] pl-2 font-bold">
@@ -504,48 +725,45 @@ export default function App() {
         </div>
 
         <div className="flex-1 p-4 lg:p-6 lg:border-r border-[#2d343d]">
-          <h3 className="text-[10px] lg:text-[11px] uppercase tracking-[0.5px] lg:tracking-[1px] text-[#94a3b8] mb-3 lg:mb-4 border-l-2 border-[#ff4e50] pl-2 font-bold">
-            进化回路性能简报 (Feedback Loop)
-          </h3>
+          <div className="flex items-center justify-between mb-3 lg:mb-4">
+            <h3 className="text-[10px] lg:text-[11px] uppercase tracking-[0.5px] lg:tracking-[1px] text-[#94a3b8] border-l-2 border-[#ff4e50] pl-2 font-bold">
+              进化回路性能简报 (Feedback Loop)
+            </h3>
+            <div className="flex items-center gap-1.5 px-2 py-0.5 bg-[#00ff9d]/10 border border-[#00ff9d]/20 rounded">
+              <div className="w-1 h-1 rounded-full bg-[#00ff9d] animate-pulse" />
+              <span className="text-[8px] text-[#00ff9d] font-mono font-bold uppercase tracking-tighter">Real-Time Logged</span>
+            </div>
+          </div>
           <p className="text-[10px] lg:text-[11px] text-[#94a3b8] font-mono uppercase mb-3">近20期逻辑进化达成率：</p>
-          <div className="flex gap-1 items-center flex-wrap">
-            {Array.from({ length: 20 }).map((_, i) => {
-              const history = analysis?.hitHistory || [];
-              const hit = history[i];
-              return (
-                <div key={i} className="relative w-2.5 h-2.5">
-                  {/* Fixed Grey Placeholder Lamp */}
-                  <div className="absolute inset-0 rounded-sm bg-[#334155]/40 border border-[#475569]/20" />
-                  
-                  {/* Animated Color Layer */}
-                  <motion.div 
-                    initial={{ opacity: 0, scale: 0 }}
-                    animate={hit !== undefined && hit !== null ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0 }}
-                    transition={{ 
-                      type: "spring",
-                      stiffness: 260,
-                      damping: 20,
-                      delay: i * 0.05
-                    }}
-                    className={cn(
-                      "absolute inset-0 rounded-sm border transition-all duration-500",
-                      hit === true ? "bg-[#00ff9d] border-[#00ff9d]/30 shadow-[0_0_12px_rgba(0,255,157,0.8)]" : 
-                      hit === false ? "bg-[#ff4e50] border-[#ff4e50]/30 shadow-[0_0_12px_rgba(255,78,80,0.8)]" : 
-                      ""
-                    )}
-                    title={hit === true ? "Success" : hit === false ? "Failure" : "Pending..."}
-                  />
-                </div>
-              );
-            })}
-            <motion.span 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 20 * 0.05 }}
-              className="ml-2 text-[10px] font-mono text-[#e0e6ed] font-bold shrink-0"
-            >
+          <div className="flex gap-2 items-center flex-wrap bg-white/5 p-3 rounded border border-white/5">
+            <div className="flex gap-1.5 items-center flex-wrap flex-1">
+              {Array.from({ length: 20 }).map((_, i) => {
+                const history = analysis?.hitHistory || [];
+                const hit = history[i];
+                return (
+                  <div key={i} className="relative w-3.5 h-3.5">
+                    {/* Fixed Deep Background */}
+                    <div className="absolute inset-0 rounded-full bg-black/40 border border-white/5" />
+                    
+                    {/* Persistent Color Core */}
+                    <motion.div 
+                      initial={{ opacity: 0, scale: 0.5 }}
+                      animate={hit !== undefined && hit !== null ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.5 }}
+                      className={cn(
+                        "absolute inset-0 rounded-full border transition-all duration-700",
+                        hit === true ? "bg-[#00ff9d] border-[#00ff9d]/40 shadow-[0_0_10px_rgba(0,255,157,0.6)]" : 
+                        hit === false ? "bg-[#ff4e50] border-[#ff4e50]/40 shadow-[0_0_10px_rgba(255,78,80,0.6)]" : 
+                        ""
+                      )}
+                      title={hit === true ? "Hit" : hit === false ? "Fail" : "Wait"}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+            <div className="text-[14px] lg:text-[16px] font-black font-mono text-white/90 ml-2 shrink-0">
               {analysis && analysis.hitHistory ? Math.round((analysis.hitHistory.filter(h => h === true).length) / (analysis.hitHistory.filter(h => h !== null).length || 1) * 100) : 0}%
-            </motion.span>
+            </div>
           </div>
         </div>
 

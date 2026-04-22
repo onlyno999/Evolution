@@ -1,0 +1,39 @@
+{
+  "entities": {
+    "HitRecord": {
+      "title": "Hit Record",
+      "description": "Historical prediction result for a specific period",
+      "type": "object",
+      "properties": {
+        "isHit": { "type": "boolean" },
+        "period": { "type": "string" },
+        "number": { "type": "number" },
+        "strategy": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["isHit", "period", "number", "strategy", "timestamp"]
+    },
+    "GlobalState": {
+      "title": "Global Prediction State",
+      "description": "The latest prediction and engine status shared globally",
+      "type": "object",
+      "properties": {
+        "period": { "type": "string" },
+        "prediction": { "type": "object" },
+        "evolutionMetadata": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["period", "prediction", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/hit_history/{periodId}": {
+      "schema": "HitRecord",
+      "description": "Logged history of red/green lights"
+    },
+    "/live_status/current": {
+      "schema": "GlobalState",
+      "description": "Real-time consensus state of the AI engine"
+    }
+  }
+}
