@@ -209,30 +209,35 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
                         (pref === 4 && rank >= 8 && rank <= 10);
 
       if (rank >= 1 && rank <= 3) {
-        scoreDelta = isLatest ? -4.0 : -2.5; // 红区处罚加剧
+        // Disciplinary penalty: noticeable but not immediately catastrophic
+        scoreDelta = isLatest ? -6.5 : -3.0; 
       } else if (isBullseye) {
-        scoreDelta = isLatest ? 3.0 : 2.0; // 责任区命中奖励
+        scoreDelta = isLatest ? 3.0 : 2.0; 
       } else if (rank >= 4 && rank <= 10) {
-        scoreDelta = isLatest ? 1.0 : 0.5; // 存活奖（非责任区但盈利）
+        scoreDelta = isLatest ? 1.0 : 0.5; 
       }
       
       winnerHistory[gene.name] += scoreDelta;
     });
   }
 
-  // 2. Final Output Construction (UI 坑位分值：基于近期“责任区”命中率的动态脉冲)
+  // 2. Final Output Construction (UI 坑位分值：动态平衡脉冲)
   const normalizedGenePulse: Record<string, number> = {};
-  const pulseWindow = 12;
+  const pulseWindow = 12; // Reverted to 12 for better sensitivity
   const zoneHits: Record<string, number> = {};
+  const redZonePenalties: Record<string, number> = {};
   
-  CHROMOSOMES.forEach(c => zoneHits[c.name] = 0);
+  CHROMOSOMES.forEach(c => {
+    zoneHits[c.name] = 0;
+    redZonePenalties[c.name] = 0;
+  });
 
   const pulseStartIdx = Math.max(startSimIdx, totalPeriods - pulseWindow);
   for (let tIdx = pulseStartIdx; tIdx < totalPeriods; tIdx++) {
     const targetEntry = sortedData[tIdx];
     const trainingData = sortedData.slice(0, tIdx);
     
-    // 获取当期各基因的预测号（复真当时状态）
+    // 复现当时预测
     const simHistoryMap: Record<number, number[]> = {};
     numRange.forEach(n => {
       const h: number[] = [];
@@ -268,16 +273,23 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
                         (pref === 4 && rank >= 8 && rank <= 10);
       
       if (isBullseye) zoneHits[gene.name]++;
+      if (rank >= 1 && rank <= 3) redZonePenalties[gene.name] += 1.2; // Softened from 2.0
     });
   }
 
   CHROMOSOMES.forEach(c => {
-    // 坑位分数 = (近期责任区命中数 / 窗口期) * 10
-    const hitRate = zoneHits[c.name] / pulseWindow;
-    normalizedGenePulse[c.name] = Math.max(1, Math.min(10, Math.round(hitRate * 10 + 2))); // 基础分2分，随命中率波动
+    const rawHitScore = (zoneHits[c.name] / pulseWindow) * 10;
+    // 基础偏移上调到 4，确保单次失误不会“归零”
+    const finalScore = Math.max(1, Math.min(10, Math.round(rawHitScore - redZonePenalties[c.name] + 4)));
+    normalizedGenePulse[c.name] = finalScore;
   });
 
-  const finalLeadership = [...CHROMOSOMES].sort((a, b) => winnerHistory[b.name] - winnerHistory[a.name]);
+  // 平衡模型：加大长效积分权重，防止频繁跳变的“见风使舵”
+  const finalLeadership = [...CHROMOSOMES].sort((a, b) => {
+    const scoreA = (winnerHistory[a.name] * 0.8) + (normalizedGenePulse[a.name] * 8.0);
+    const scoreB = (winnerHistory[b.name] * 0.8) + (normalizedGenePulse[b.name] * 8.0);
+    return scoreB - scoreA;
+  });
   const finalAlpha = finalLeadership[0];
   const displayHitHistory = [...fullSimulationHistory].slice(-20);
   const redStreak = [...displayHitHistory].reverse().findIndex(h => h !== false); 
