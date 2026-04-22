@@ -36,6 +36,8 @@ export interface AnalysisResult {
   };
   genePulse?: Record<string, number>;
   genePredictions?: Record<string, number>;
+  geneLastRanks?: Record<string, number>;
+  geneHistory?: { period: string; leader: string; results: Record<string, { num: number; rank: number }> }[];
 }
 
 // Unified scoring function to ensure consistency between simulation and live predictions
@@ -43,7 +45,7 @@ export interface AnalysisResult {
  * Genetic Strategy Chromosomes
  * Each one represents a different evolutionary path.
  */
-interface StrategyChromosome {
+export interface StrategyChromosome {
   name: string;
   weights: {
     density: number;
@@ -54,7 +56,7 @@ interface StrategyChromosome {
   };
 }
 
-const CHROMOSOMES: StrategyChromosome[] = [
+export const CHROMOSOMES: StrategyChromosome[] = [
   { name: "Rapid-Rebound", weights: { density: 1.0, momentum: 4.5, recency: 3.5, p3Safety: 0.5, zonePreference: 1 } }, // Zone 1: P4-P6
   { name: "Stable-Trend", weights: { density: 3.0, momentum: 0.5, recency: 0.2, p3Safety: 5.0, zonePreference: 2 } },  // Zone 2: P6-P8
   { name: "Alpha-Centrist", weights: { density: 2.0, momentum: 1.0, recency: 1.0, p3Safety: 1.0, zonePreference: 3 } }, // Zone 3: P7-P9
@@ -129,20 +131,22 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
   const winnerHistory: Record<string, number> = {};
   const geneOverallLastRec: Record<string, number> = {};
   CHROMOSOMES.forEach(c => {
-    winnerHistory[c.name] = 5.0; // Start with baseline "trust"
+    winnerHistory[c.name] = 100.0; // 全部初始化：100分
     geneOverallLastRec[c.name] = -1;
   });
 
   const fullSimulationHistory: boolean[] = [];
   const predictionHistory: Record<string, number> = {};
   const recHistory: number[] = [];
-  const startSimIdx = 5; // Reduced from 10 to provide more historical depth
+  const geneHistoryLogs: { period: string; leader: string; results: Record<string, { num: number; rank: number }> }[] = [];
+  
+  // 核心变更：为了让分数“看起来统一”，我们只对最近 20 期进行积分实战模拟
+  const walkStartIdx = Math.max(5, totalPeriods - 20); 
 
-  for (let tIdx = startSimIdx; tIdx < totalPeriods; tIdx++) {
+  for (let tIdx = walkStartIdx; tIdx < totalPeriods; tIdx++) {
     const trainingData = sortedData.slice(0, tIdx);
     const targetEntry = sortedData[tIdx];
 
-    // 关键修正：只有在该期已经有正式开奖结果的情况下，才记录红绿灯
     if (!targetEntry.numbers || targetEntry.numbers.length < 10) continue;
 
     const simHistoryMap: Record<number, number[]> = {};
@@ -157,34 +161,16 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
       simDensityMap[n] = (h.filter(p => p >= 4).length / (h.length || 1)) * 100;
     });
 
-    // A. Identify the LEADER at this specific moment in history
     const currentLeadership = [...CHROMOSOMES].sort((a,b) => winnerHistory[b.name] - winnerHistory[a.name]);
-    const alphaAtThisMoment = currentLeadership[0];
-
-    // B. Re-calculate scores for the leader to get the system's official choice for this period
-    const alphaCandidates = numRange.map(n => {
-        const lastRec = recHistory.length > 0 ? recHistory[recHistory.length - 1] : null;
-        return {
-            num: n,
-            score: calculateGeneticScore(n, simHistoryMap[n], simDensityMap[n], alphaAtThisMoment, n === lastRec)
-        };
-    }).sort((a, b) => b.score - a.score);
     
-    const systemChoice = alphaCandidates[0].num;
-    predictionHistory[targetEntry.period] = systemChoice;
-    
-    const systemRank = targetEntry.numbers.indexOf(systemChoice) + 1;
-    // 只有主推号进入 P4-P10 才亮绿灯
-    const isHit = systemRank >= 4 && systemRank <= 10;
-    fullSimulationHistory.push(isHit);
-    recHistory.push(systemChoice);
-
-    // C. 核心：四大基因“责任区”演化考核
+    // Assign unique numbers for THIS round based on hierarchy
     const takenInRound = new Set<number>();
+    const roundPredictions: Record<string, number> = {};
+
     currentLeadership.forEach(gene => {
       const candidates = numRange.map(n => ({
         num: n,
-        score: calculateGeneticScore(n, simHistoryMap[n], (simHistoryMap[n].filter(p => p >= 4).length / (simHistoryMap[n].length || 1)) * 100, gene, false)
+        score: calculateGeneticScore(n, simHistoryMap[n], simDensityMap[n], gene, recHistory.length > 0 && n === recHistory[recHistory.length - 1])
       })).sort((a, b) => b.score - a.score);
 
       let bestForGene = candidates[0].num;
@@ -194,118 +180,83 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
           break;
         }
       }
-      geneOverallLastRec[gene.name] = bestForGene; 
+      roundPredictions[gene.name] = bestForGene;
       takenInRound.add(bestForGene);
-      
-      const rank = targetEntry.numbers.indexOf(bestForGene) + 1;
-      const isLatest = tIdx === totalPeriods - 1;
-      let scoreDelta = 0;
+    });
 
-      // 判定逻辑：必须落在自己的“责任区”才算满分，落在其他盈利区算生存，落在红区大减分
+    const systemChoice = roundPredictions[currentLeadership[0].name];
+    predictionHistory[targetEntry.period] = systemChoice;
+    const systemRank = targetEntry.numbers.indexOf(systemChoice) + 1;
+    fullSimulationHistory.push(systemRank >= 4 && systemRank <= 10);
+    recHistory.push(systemChoice);
+
+    const periodResults: Record<string, { num: number; rank: number }> = {};
+
+    // 全量积分累积：严格执行用户最新的奖惩标准
+    CHROMOSOMES.forEach(gene => {
+      const pred = roundPredictions[gene.name];
+      const rank = targetEntry.numbers.indexOf(pred) + 1;
       const pref = gene.weights.zonePreference;
+      
+      periodResults[gene.name] = { num: pred, rank: rank };
+
       const isBullseye = (pref === 1 && rank >= 4 && rank <= 6) || 
                         (pref === 2 && rank >= 6 && rank <= 8) || 
                         (pref === 3 && rank >= 7 && rank <= 9) || 
                         (pref === 4 && rank >= 8 && rank <= 10);
 
+      let delta = 0;
       if (rank >= 1 && rank <= 3) {
-        // Disciplinary penalty: noticeable but not immediately catastrophic
-        scoreDelta = isLatest ? -6.5 : -3.0; 
+        delta = -15.0; // 闯红灯：扣15
       } else if (isBullseye) {
-        scoreDelta = isLatest ? 3.0 : 2.0; 
+        delta = 10.0;  // 指定坑位：涨10
       } else if (rank >= 4 && rank <= 10) {
-        scoreDelta = isLatest ? 1.0 : 0.5; 
+        delta = 5.0;   // 安全区命中：涨5
       }
       
-      winnerHistory[gene.name] += scoreDelta;
+      winnerHistory[gene.name] = Math.max(1, Math.min(1000, winnerHistory[gene.name] + delta));
+    });
+
+    geneHistoryLogs.push({
+      period: targetEntry.period,
+      leader: currentLeadership[0].name,
+      results: periodResults
     });
   }
 
-  // 2. Final Output Construction (UI 坑位分值：动态平衡脉冲)
-  const normalizedGenePulse: Record<string, number> = {};
-  const pulseWindow = 12; // Reverted to 12 for better sensitivity
-  const zoneHits: Record<string, number> = {};
-  const redZonePenalties: Record<string, number> = {};
-  
-  CHROMOSOMES.forEach(c => {
-    zoneHits[c.name] = 0;
-    redZonePenalties[c.name] = 0;
-  });
-
-  const pulseStartIdx = Math.max(startSimIdx, totalPeriods - pulseWindow);
-  for (let tIdx = pulseStartIdx; tIdx < totalPeriods; tIdx++) {
-    const targetEntry = sortedData[tIdx];
-    const trainingData = sortedData.slice(0, tIdx);
-    
-    // 复现当时预测
-    const simHistoryMap: Record<number, number[]> = {};
-    numRange.forEach(n => {
-      const h: number[] = [];
-      trainingData.forEach(e => {
-        const r = e.numbers.indexOf(n);
-        if (r !== -1) h.push(r + 1);
-      });
-      simHistoryMap[n] = h;
-    });
-
-    const takenInRound = new Set<number>();
-    const roundOrder = [...CHROMOSOMES].sort((a,b) => winnerHistory[b.name] - winnerHistory[a.name]);
-
-    roundOrder.forEach(gene => {
-      const candidates = numRange.map(n => ({
-        num: n,
-        score: calculateGeneticScore(n, simHistoryMap[n], (simHistoryMap[n].filter(p => p >= 4).length / (simHistoryMap[n].length || 1)) * 100, gene, false)
-      })).sort((a, b) => b.score - a.score);
-
-      let bestForGene = candidates[0].num;
-      for (const cand of candidates) {
-        if (!takenInRound.has(cand.num)) {
-          bestForGene = cand.num;
-          break;
-        }
-      }
-      takenInRound.add(bestForGene);
-      const rank = targetEntry.numbers.indexOf(bestForGene) + 1;
-      const pref = gene.weights.zonePreference;
-      const isBullseye = (pref === 1 && rank >= 4 && rank <= 6) || 
-                        (pref === 2 && rank >= 6 && rank <= 8) || 
-                        (pref === 3 && rank >= 7 && rank <= 9) || 
-                        (pref === 4 && rank >= 8 && rank <= 10);
-      
-      if (isBullseye) zoneHits[gene.name]++;
-      if (rank >= 1 && rank <= 3) redZonePenalties[gene.name] += 1.2; // Softened from 2.0
-    });
-  }
-
-  CHROMOSOMES.forEach(c => {
-    const rawHitScore = (zoneHits[c.name] / pulseWindow) * 10;
-    // 基础偏移上调到 4，确保单次失误不会“归零”
-    const finalScore = Math.max(1, Math.min(10, Math.round(rawHitScore - redZonePenalties[c.name] + 4)));
-    normalizedGenePulse[c.name] = finalScore;
-  });
-
-  // 平衡模型：加大长效积分权重，防止频繁跳变的“见风使舵”
+  // 2. Final Output Construction
+  // 提取当前最新预测 (Next Round)，将其作为“待开奖”行加入历史记录
   const finalLeadership = [...CHROMOSOMES].sort((a, b) => {
-    const scoreA = (winnerHistory[a.name] * 0.8) + (normalizedGenePulse[a.name] * 8.0);
-    const scoreB = (winnerHistory[b.name] * 0.8) + (normalizedGenePulse[b.name] * 8.0);
-    return scoreB - scoreA;
+    return winnerHistory[b.name] - winnerHistory[a.name];
   });
   const finalAlpha = finalLeadership[0];
-  const displayHitHistory = [...fullSimulationHistory].slice(-20);
+
+  // 恢复接力模式：红绿灯记录的是每一期【当时对应霸主】的真实战绩
+  // 无论谁在台上，红绿灯只看那一刻正式推荐的号准不准，形成连续的接力账本
+  // 过滤掉 rank: -1 的待开奖行，只取最近 20 期已入账的结果，确保灯位全满（只要数据够）
+  const completedHistory = geneHistoryLogs.filter(h => {
+    const leader = h.leader;
+    return h.results[leader] && h.results[leader].rank !== -1;
+  });
+
+  const displayHitHistory: boolean[] = completedHistory.slice(-20).map(round => {
+    const res = round.results[round.leader];
+    return res.rank >= 4 && res.rank <= 10;
+  });
+
   const redStreak = [...displayHitHistory].reverse().findIndex(h => h !== false); 
   
   const liveCandidates = numRange.map(n => {
     const history = globalPosHistory[n] || [];
-    const density = (history.filter(p => p >= 4).length / (history.length || 1)) * 100;
+    const d = (history.filter(p => p >= 4).length / (history.length || 1)) * 100;
     const lastRec = recHistory.length > 0 ? recHistory[recHistory.length - 1] : null;
     return {
       num: n,
-      score: calculateGeneticScore(n, history, density, finalAlpha, n === lastRec)
+      score: calculateGeneticScore(n, history, d, finalAlpha, n === lastRec)
     };
   }).sort((a, b) => b.score - a.score);
 
   const bestRec = liveCandidates[0].num;
-
   const genePredictions: Record<string, number> = {};
   const currentTaken = new Set<number>();
   
@@ -328,8 +279,39 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
     currentTaken.add(bestUnique);
   });
 
+  // 关键：将“当前预测”压入历史日志的第一行，名次标注为 -1 (代表待定)
+  const lastFinishedEntry = sortedData[totalPeriods - 1];
+  if (lastFinishedEntry) {
+    const nextPeriod = (parseInt(lastFinishedEntry.period) + 1).toString();
+    const nextRoundResults: Record<string, { num: number; rank: number }> = {};
+    CHROMOSOMES.forEach(g => {
+        nextRoundResults[g.name] = { num: genePredictions[g.name], rank: -1 };
+    });
+    geneHistoryLogs.push({
+        period: nextPeriod,
+        leader: finalAlpha.name,
+        results: nextRoundResults
+    });
+  }
+
+  // 提取最后一期实战结果作为“卡片展示”的上期名次
+  const geneLastRanks: Record<string, number> = {};
+  // 注意：因为我们刚加了“待定”行，所以上期结果要在倒数第二行找，或者直接从刚才的循环记录中取
+  const genuineHistory = geneHistoryLogs.filter(h => Object.values(h.results).every(r => r.rank !== -1));
+  if (genuineHistory.length > 0) {
+    const lastDrawn = genuineHistory[genuineHistory.length - 1];
+    Object.entries(lastDrawn.results).forEach(([name, res]) => {
+      geneLastRanks[name] = res.rank;
+    });
+  }
+
+  const normalizedGenePulse: Record<string, number> = {};
+  CHROMOSOMES.forEach(c => {
+    normalizedGenePulse[c.name] = Math.round(winnerHistory[c.name]);
+  });
+
   return {
-    regressionReport: `遗传算法已激活：当前最优基因集 [${finalAlpha.name}]。已回溯分析${totalPeriods}期，并根据各基因共振频率完成${CHROMOSOMES.length}重路径重构。`,
+    regressionReport: `遗传算法已激活：当前最优基因集 [${finalAlpha.name}]。已针对第${(parseInt(lastFinishedEntry?.period || '0') + 1)}期完成最新路径演化。`,
     consecutiveNumbers: [], 
     positionDensity: {},
     prediction: {
@@ -362,6 +344,8 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
         optimizationRate: "Alpha-Resonance"
     },
     genePulse: normalizedGenePulse,
-    genePredictions: genePredictions
+    genePredictions: genePredictions,
+    geneLastRanks: geneLastRanks,
+    geneHistory: geneHistoryLogs
   };
 }

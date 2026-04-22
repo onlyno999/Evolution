@@ -13,7 +13,10 @@ import {
   Zap,
   Microscope,
   Box,
-  LineChart
+  LineChart,
+  Database,
+  Activity,
+  ChevronRight
 } from "lucide-react";
 import { 
   ComposedChart, 
@@ -29,7 +32,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
-import { perform3DAnalysis, type LotteryEntry, type AnalysisResult } from "./lib/analysis";
+import { perform3DAnalysis, type LotteryEntry, type AnalysisResult, CHROMOSOMES } from "./lib/analysis";
 import { 
   fetchHitHistoryFromCloud, 
   syncHitHistoryToCloud, 
@@ -276,21 +279,22 @@ export default function App() {
       // 也有 finishedRounds [新 -> 旧]
       // 我们需要确保显示出的 20 个灯，准确对应最近的 20 个已开奖期号
       const finalizedHistory = result.hitHistory.map((h, i) => {
-        // 计算这个灯对应的历史偏移量
-        // i=0 是最旧的灯。如果 history.length=20，i=0 就是离现在第 20 远的灯。
         const offset = result.hitHistory.length - 1 - i;
         const targetRound = finishedRounds[offset];
         
         if (targetRound) {
           const p = targetRound.period;
-          // 如果云端有共识，用云端的。否则，如果我们在 analysis 中记录了主推号的 Rank，直接用 Rank 判定
           const predNum = result.predictionHistory[p];
-          if (combinedHistoryMap[p] !== undefined) return combinedHistoryMap[p];
           
+          // CRITICAL: Force UI to calculate truth based on actual rank if cloud sync is messy
           if (predNum !== undefined) {
              const actualRank = targetRound.numbers.indexOf(predNum) + 1;
-             return actualRank >= 4 && actualRank <= 10;
+             // Any position between 4 and 10 is a definitive GREEN HIT
+             if (actualRank >= 4 && actualRank <= 10) return true;
+             if (actualRank >= 1 && actualRank <= 3) return false;
           }
+
+          if (combinedHistoryMap[p] !== undefined) return combinedHistoryMap[p];
         }
         return h;
       });
@@ -571,7 +575,7 @@ export default function App() {
               return (
                 <div key={name} className={cn(
                   "p-2 border rounded transition-all duration-300",
-                  isAlpha ? "bg-[#00ff9d]/10 border-[#00ff9d]/30" : "bg-black/40 border-white/5"
+                  isAlpha ? "bg-[#00ff9d]/10 border-[#00ff9d]/30 shadow-[0_0_10px_rgba(0,255,157,0.05)]" : "bg-black/40 border-white/5"
                 )}>
                   <div className="flex justify-between items-center mb-1.5">
                     <div className="flex items-center gap-1.5">
@@ -588,12 +592,13 @@ export default function App() {
                         </span>
                       )}
                     </div>
-                    <span className="text-[9px] font-mono text-white/60">{score}/10</span>
+                    <span className="text-[9px] font-mono text-white/60">{score}/1000</span>
                   </div>
-                  <div className="h-1 bg-white/5 rounded-full overflow-hidden">
+                  
+                  <div className="h-1 bg-white/5 rounded-full overflow-hidden mt-1">
                     <motion.div 
                       initial={{ width: 0 }}
-                      animate={{ width: `${(score / 10) * 100}%` }}
+                      animate={{ width: `${(score / 1000) * 100}%` }}
                       className={cn(
                         "h-full transition-all duration-1000",
                         isAlpha ? "bg-[#00ff9d]" : "bg-[#3b82f6]/40"
@@ -603,6 +608,88 @@ export default function App() {
                 </div>
               );
             })}
+          </div>
+
+          {/* 演化实战日志 (EVOLUTION LOGS) */}
+          <div className="bg-black/40 border border-white/10 rounded-xl overflow-hidden mt-3 shadow-inner">
+            <div className="px-3 py-2 border-b border-white/10 flex items-center justify-between bg-white/5">
+              <div className="flex items-center gap-2">
+                <Database className="w-3.5 h-3.5 text-[#00ff9d]" />
+                <span className="text-[10px] font-bold tracking-widest text-[#00ff9d]">演化实战日志 / EVOLUTION LOGS</span>
+              </div>
+              <span className="text-[8px] text-white/30 font-mono">HISTORY [LAST 20 ROUNDS]</span>
+            </div>
+            <div className="max-h-[220px] overflow-y-auto custom-scrollbar">
+              <table className="w-full text-left border-collapse table-fixed">
+                <thead className="sticky top-0 bg-[#0a0a0a] z-10">
+                  <tr className="border-b border-white/5">
+                    <th className="p-2 w-[50px] text-[8px] text-white/40 font-mono uppercase">期号</th>
+                    <th className="p-2 text-[8px] text-white/40 font-mono uppercase text-center">RAPID</th>
+                    <th className="p-2 text-[8px] text-white/40 font-mono uppercase text-center">STAL</th>
+                    <th className="p-2 text-[8px] text-white/40 font-mono uppercase text-center">ALPH</th>
+                    <th className="p-2 text-[8px] text-white/40 font-mono uppercase text-center">AGGR</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                        {[...(analysis?.geneHistory || [])].reverse().map((round) => (
+                          <tr key={round.period} className={cn(
+                            "hover:bg-white/5 transition-colors",
+                            (Object.values(round.results)[0] as any).rank === -1 && "bg-[#00ff9d]/5 border-y border-[#00ff9d]/20"
+                          )}>
+                            <td className="p-2 text-[10px] font-mono text-white/70 whitespace-nowrap">
+                              {round.period.slice(-3)}
+                              {(Object.values(round.results)[0] as any).rank === -1 && (
+                                <span className="ml-1 text-[7px] bg-[#00ff9d] text-black px-0.5 rounded font-bold animate-pulse">LIVE</span>
+                              )}
+                            </td>
+                            {CHROMOSOMES.map(c => {
+                              const res = round.results[c.name];
+                              if (!res) return <td key={c.name} className="p-2 text-center text-[10px] text-white/10">-</td>;
+                              const isPending = res.rank === -1;
+                              const isWin = res.rank >= 4 && res.rank <= 10;
+                              const isLeader = round.leader === c.name;
+                              
+                              return (
+                                <td key={c.name} className="p-2 text-center">
+                                  <div className="flex flex-col items-center">
+                                    <span className={cn(
+                                      "text-[10px] font-bold px-1.5 rounded-sm min-w-[20px] leading-tight transition-all duration-300",
+                                      isLeader && "ring-1 ring-yellow-400/60 shadow-[0_0_8px_rgba(250,204,21,0.3)]",
+                                      isPending ? "text-white/80 bg-white/10 border border-white/20" :
+                                      isWin ? "text-green-400 bg-green-400/10" : "text-red-400 bg-red-400/10"
+                                    )}>
+                                      {res.num.toString().padStart(2, '0')}
+                                    </span>
+                                    <span className={cn(
+                                      "text-[7px] font-mono mt-0.5",
+                                      isLeader ? "text-yellow-400/70 font-bold" : "text-white/30"
+                                    )}>
+                                      {isPending ? "---" : `P${res.rank.toString().padStart(2, '0')}`}
+                                    </span>
+                                    {!isPending && res.rank >= 4 && res.rank <= 10 && (
+                                      <span className={cn(
+                                        "text-[6px] px-1 rounded-full border leading-none mt-0.5 py-0.5",
+                                        (c.weights.zonePreference === 1 && res.rank >= 4 && res.rank <= 6) ||
+                                        (c.weights.zonePreference === 2 && res.rank >= 6 && res.rank <= 8) ||
+                                        (c.weights.zonePreference === 3 && res.rank >= 7 && res.rank <= 9) ||
+                                        (c.weights.zonePreference === 4 && res.rank >= 8 && res.rank <= 10)
+                                          ? "bg-green-500/30 text-green-200 border-green-500/40 font-bold"
+                                          : "text-white/20 border-white/10"
+                                      )}>
+                                        {c.weights.zonePreference === 1 ? "P4-6" :
+                                         c.weights.zonePreference === 2 ? "P6-8" :
+                                         c.weights.zonePreference === 3 ? "P7-9" : "P8-10"}
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </section>
 
