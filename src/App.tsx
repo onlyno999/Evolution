@@ -272,10 +272,16 @@ export default function App() {
       const combinedHistoryMap = { ...localHistoryMap, ...cloudHits };
       
       // Restore the "Consensus" History for UI display
+      // result.hitHistory is [oldest ... newest] where newest is the last FINISHED period
       const finalizedHistory = result.hitHistory.map((h, i) => {
-        const dataIdx = 19 - i;
+        // Find corresponding data period for this hit
+        // The last finished period is data[1] (since data[0] is current/active)
+        const reverseIdx = result.hitHistory.length - 1 - i;
+        const dataIdx = reverseIdx + 1; // data[1] is the newest hit
+        
         if (dataIdx >= 0 && dataIdx < data.length) {
           const p = data[dataIdx].period;
+          // Priority: Cloud Hits > Local Logic
           return combinedHistoryMap[p] !== undefined ? combinedHistoryMap[p] : h;
         }
         return h;
@@ -325,12 +331,15 @@ export default function App() {
         const dataIdx = 19 - i;
         if (dataIdx >= 0 && dataIdx < data.length) {
           const p = data[dataIdx].period;
-          if (cloudHits[p] === undefined && h !== null && localHistoryMap[p] === undefined) {
+          // IMPORTANT: Use the actual number predicted for THIS past period during simulation
+          const historicalPredictionNum = analysis.predictionHistory[p];
+          
+          if (cloudHits[p] === undefined && h !== null && localHistoryMap[p] === undefined && historicalPredictionNum) {
              localHistoryMap[p] = h;
              newHitsForCloud.push({
                period: p,
                isHit: h,
-               number: analysis.prediction.number,
+               number: historicalPredictionNum,
                strategy: analysis.prediction.strategy,
                timestamp: new Date().toISOString()
              });

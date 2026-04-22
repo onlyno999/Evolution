@@ -21,10 +21,12 @@ export interface AnalysisResult {
     number: number;
     targetZone: string;
     confidence: number;
-    strategy: "Momentum" | "Liquidation-Pivot" | "Value-Capture";
+    strategy: string;
     evolutionLevel: number;
+    version: string;
   };
-  hitHistory: boolean[]; // Last 10 prediction results (true = hit, false = miss)
+  hitHistory: boolean[]; // Last 20 prediction results
+  predictionHistory: Record<string, number>; // period -> predictedNumber
   kLineData: any[];
   stockMarket: StockMetric[];
   evolutionMetrics: {
@@ -213,6 +215,7 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
   // 2. Main Simulation Loop (using weighted DNA based on the Alpha Gene)
   const fullSimulationHistory: (boolean | null)[] = [];
   const recHistory: number[] = []; 
+  const predictionHistory: Record<string, number> = {};
   const startSimIdx = 10; 
   let lastSimRec: number | null = null; 
 
@@ -220,38 +223,37 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
     const trainingData = sortedData.slice(0, tIdx);
     const targetEntry = sortedData[tIdx];
     
-    const simHistory: Record<number, number[]> = {};
-    const simDensity: Record<number, number> = {};
+    // Use the draft system for simulation as well to be consistent
+    const simHistoryMap: Record<number, number[]> = {};
+    const simDensityMap: Record<number, number> = {};
     numRange.forEach(n => {
       const h: number[] = [];
       trainingData.forEach(e => {
         const r = e.numbers.indexOf(n);
         if (r !== -1) h.push(r + 1);
       });
-      simHistory[n] = h;
-      simDensity[n] = (h.filter(p => p >= 4).length / (h.length || 1)) * 100;
+      simHistoryMap[n] = h;
+      simDensityMap[n] = (h.filter(p => p >= 4).length / (h.length || 1)) * 100;
     });
 
-    const simCandidates = numRange.map(n => {
-      let chasingPenalty = 1.0;
-      for (let i = 1; i <= 3; i++) {
-        const pIdx = fullSimulationHistory.length - i;
-        if (pIdx >= 0 && recHistory[pIdx] === n && fullSimulationHistory[pIdx] === false) chasingPenalty *= 0.1;
-      }
-      return {
-        num: n,
-        score: calculateGeneticScore(n, simHistory[n], simDensity[n], alphaGene, n === lastSimRec) * chasingPenalty
-      };
-    }).sort((a, b) => b.score - a.score);
+    const simCandidates = numRange.map(n => ({
+      num: n,
+      score: calculateGeneticScore(n, simHistoryMap[n], simDensityMap[n], alphaGene, n === lastSimRec)
+    })).sort((a, b) => b.score - a.score);
 
     const simRec = simCandidates[0]?.num;
     lastSimRec = simRec; 
     recHistory.push(simRec);
+    predictionHistory[targetEntry.period] = simRec;
+
     const actualRank = targetEntry.numbers.indexOf(simRec) + 1;
     fullSimulationHistory.push(actualRank >= 4 && actualRank <= 10);
   }
 
   // 3. Final Hit History Construction
+  // fullSimulationHistory Index Map:
+  // [0] = result for sortedData[10]
+  // [totalLength - 1] = result for sortedData[totalLength - 1] (which is the last finished period)
   const displayHitHistory = [...fullSimulationHistory].slice(-20);
   // ... (rest remains consistent but uses alphaGene and its metrics)
   
@@ -312,6 +314,7 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
       version: `V${Math.floor(totalPeriods/10)}.${alphaGene.name.slice(0,2)}`
     },
     hitHistory: displayHitHistory,
+    predictionHistory: predictionHistory,
     stockMarket: numRange.map(n => ({
       symbol: `$N${n.toString().padStart(2, '0')}`,
       number: n,
