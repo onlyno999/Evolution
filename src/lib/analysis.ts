@@ -207,16 +207,17 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
                         (pref === 3 && rank >= 7 && rank <= 9) || 
                         (pref === 4 && rank >= 8 && rank <= 10);
 
-      let delta = 0;
+      // 全量积分累积：执行严格的淘汰与奖励机制
       if (rank >= 1 && rank <= 3) {
-        delta = -15.0; // 闯红灯：扣15
+        // 闯红灯：直接洗白，初始化到 100 分
+        winnerHistory[gene.name] = 100.0;
       } else if (isBullseye) {
-        delta = 10.0;  // 指定坑位：涨10
+        // 指定坑位：涨 50 分
+        winnerHistory[gene.name] = Math.min(1000, winnerHistory[gene.name] + 50.0);
       } else if (rank >= 4 && rank <= 10) {
-        delta = 5.0;   // 安全区命中：涨5
+        // 安全区命中：涨 10 分
+        winnerHistory[gene.name] = Math.min(1000, winnerHistory[gene.name] + 10.0);
       }
-      
-      winnerHistory[gene.name] = Math.max(1, Math.min(1000, winnerHistory[gene.name] + delta));
     });
 
     geneHistoryLogs.push({
