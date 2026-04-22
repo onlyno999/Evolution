@@ -136,11 +136,14 @@ export function perform3DAnalysis(data: LotteryEntry[]): AnalysisResult {
   const fullSimulationHistory: boolean[] = [];
   const predictionHistory: Record<string, number> = {};
   const recHistory: number[] = [];
-  const startSimIdx = 10; 
+  const startSimIdx = 5; // Reduced from 10 to provide more historical depth
 
   for (let tIdx = startSimIdx; tIdx < totalPeriods; tIdx++) {
     const trainingData = sortedData.slice(0, tIdx);
     const targetEntry = sortedData[tIdx];
+
+    // 关键修正：只有在该期已经有正式开奖结果的情况下，才记录红绿灯
+    if (!targetEntry.numbers || targetEntry.numbers.length < 10) continue;
 
     const simHistoryMap: Record<number, number[]> = {};
     const simDensityMap: Record<number, number> = {};

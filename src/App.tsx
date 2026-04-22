@@ -264,25 +264,33 @@ export default function App() {
     
     // 2. Pure UI Logic: Combine current results with cloud overrides
     try {
-      const storageKey = "evolution_history_v3";
+      const storageKey = "evolution_consensus_v7_alignment";
       const saved = localStorage.getItem(storageKey);
       const localHistoryMap: Record<string, boolean> = saved ? JSON.parse(saved) : {};
       
-      // Combine with cloud data (Cloud has priority)
       const combinedHistoryMap = { ...localHistoryMap, ...cloudHits };
       
-      // Restore the "Consensus" History for UI display
-      // result.hitHistory is [oldest ... newest] where newest is the last FINISHED period
+      const finishedRounds = data.filter(d => d.numbers && d.numbers.length === 10);
+      
+      // 深度对齐：我们有 result.hitHistory [旧 -> 新]
+      // 也有 finishedRounds [新 -> 旧]
+      // 我们需要确保显示出的 20 个灯，准确对应最近的 20 个已开奖期号
       const finalizedHistory = result.hitHistory.map((h, i) => {
-        // Find corresponding data period for this hit
-        // In the 'data' array, data[0] is the newest finished period
-        const reverseIdx = result.hitHistory.length - 1 - i;
-        const dataIdx = reverseIdx; // FIXED: data[0] is the newest hit
+        // 计算这个灯对应的历史偏移量
+        // i=0 是最旧的灯。如果 history.length=20，i=0 就是离现在第 20 远的灯。
+        const offset = result.hitHistory.length - 1 - i;
+        const targetRound = finishedRounds[offset];
         
-        if (dataIdx >= 0 && dataIdx < data.length) {
-          const p = data[dataIdx].period;
-          // Priority: Cloud Hits > Local Logic
-          return combinedHistoryMap[p] !== undefined ? combinedHistoryMap[p] : h;
+        if (targetRound) {
+          const p = targetRound.period;
+          // 如果云端有共识，用云端的。否则，如果我们在 analysis 中记录了主推号的 Rank，直接用 Rank 判定
+          const predNum = result.predictionHistory[p];
+          if (combinedHistoryMap[p] !== undefined) return combinedHistoryMap[p];
+          
+          if (predNum !== undefined) {
+             const actualRank = targetRound.numbers.indexOf(predNum) + 1;
+             return actualRank >= 4 && actualRank <= 10;
+          }
         }
         return h;
       });
@@ -319,7 +327,7 @@ export default function App() {
     if (!analysis || data.length === 0) return;
 
     try {
-      const storageKey = "evolution_history_v3";
+      const storageKey = "evolution_consensus_v7_alignment";
       const saved = localStorage.getItem(storageKey);
       const localHistoryMap: Record<string, boolean> = saved ? JSON.parse(saved) : {};
       
@@ -329,10 +337,11 @@ export default function App() {
       // Detect if we have new results that need to be broadcast to cloud
       analysis.hitHistory.forEach((h, i) => {
         const reverseIdx = analysis.hitHistory.length - 1 - i;
-        const dataIdx = reverseIdx; 
-        if (dataIdx >= 0 && dataIdx < data.length) {
-          const p = data[dataIdx].period;
-          // IMPORTANT: Use the actual number predicted for THIS past period during simulation
+        const finishedRounds = data.filter(d => d.numbers && d.numbers.length === 10);
+        const targetRound = finishedRounds[reverseIdx];
+
+        if (targetRound) {
+          const p = targetRound.period;
           const historicalPredictionNum = analysis.predictionHistory[p];
           
           if (cloudHits[p] === undefined && h !== null && localHistoryMap[p] === undefined && historicalPredictionNum) {
