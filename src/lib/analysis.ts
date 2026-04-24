@@ -71,7 +71,7 @@ const CHROMOSOMES: StrategyChromosome[] = [
   { name: "RAPID", weights: { density: 1.0, momentum: 4.5, recency: 3.5, p3Safety: 2.0, zonePreference: 1 } }, // Zone 1: P4-P6
   { name: "STAL", weights: { density: 3.0, momentum: 3.5, recency: 2.0, p3Safety: 5.0, zonePreference: 2 } },  // Zone 2: P6-P8
   { name: "ALPH", weights: { density: 2.0, momentum: 4.0, recency: 3.0, p3Safety: 3.0, zonePreference: 3 } }, // Zone 3: P7-P9
-  { name: "AGGR", weights: { density: 2.0, momentum: 7.0, recency: 6.0, p3Safety: 1.5, zonePreference: 4 } } // Zone 4: P8-P10 (High Speed, High Attack)
+  { name: "AGGR", weights: { density: 1.5, momentum: 8.0, recency: 7.0, p3Safety: 1.0, zonePreference: 4 } } // Zone 4: P8-P10 (Max Resonance Sensitivity)
 ];
 
 function calculateGeneticScore(
@@ -296,44 +296,51 @@ export function perform3DAnalysis(data: LotteryEntry[], historicalLogs: Evolutio
     }
   }
 
-  // Final Alpha Selection after backtest completes
-  const finalAlphaOrder = [...CHROMOSOMES].sort((a,b) => (winnerHistory[b.name] || 0) - (winnerHistory[a.name] || 0));
-  
-  // Calculate specific "Recent Strength" for the Pulse UI (Using Decay Weighting for higher sensitivity)
+  // 1. Calculate Pulse FIRST
   const pulseRollingWindow = 20;
   const recentGeneHits: Record<string, number> = {};
   CHROMOSOMES.forEach(c => recentGeneHits[c.name] = 0);
 
-  // Get the most recent logs and reverse them so index 0 is the most recent
   const recentLogsForPulse = [...evolutionLogs].slice(-pulseRollingWindow).reverse();
 
-  // Use a decay factor: most recent hits contribute significantly more to the "Pulse"
   recentLogsForPulse.forEach((log, index) => {
-      const weight = Math.pow(0.82, index); // Slightly more aggressive decay
+      const weight = Math.pow(0.82, index);
       Object.entries(log.genes).forEach(([name, g]) => {
           if (g.isHit) {
-            recentGeneHits[name] = (recentGeneHits[name] || 0) + (12 * weight);
+            // Priority 1: High Reward for hitting the target Zone (Alpha Resonance)
+            recentGeneHits[name] = (recentGeneHits[name] || 0) + (15 * weight);
+          } else if (g.rank !== null && g.rank <= 3) {
+            // Priority 2: Heavy Penalty for "dropping into the red zone" (Rank 1-3)
+            // This satisfies the user's "掉入了红区。各自就扣取相应的权重" requirement.
+            recentGeneHits[name] = (recentGeneHits[name] || 0) - (12 * weight);
           }
       });
   });
 
-  // Normalize Gene Pulse (Dynamic range 1-10)
   const normalizedGenePulse: Record<string, number> = {};
   CHROMOSOMES.forEach(c => {
     const rawStrength = recentGeneHits[c.name] || 0;
     // Map raw decay score to 1-10 scale. 
-    // If it hit recently, the score should be around 5-8. If it hits multiple times, it hits 10.
-    let score = Math.round(rawStrength / 4) + 2; 
+    let score = Math.round(rawStrength / 4) + 3; 
     
-    // Explicitly check for the absolute latest hit to ensure visual reaction
     const latestLog = evolutionLogs[evolutionLogs.length - 1]; 
     if (latestLog && latestLog.genes[c.name]?.isHit) {
-        score = Math.max(score, 7); // At least 7 if they just hit
-        score += 2; // Extra pulse boost for immediate feedback
+        score = Math.max(score, 8); // At least 8 if they just hit
+        score += 2; // Extra pulse boost 
+    } else if (latestLog && latestLog.genes[c.name]?.rank !== null && (latestLog.genes[c.name].rank || 0) <= 3) {
+        score = Math.max(1, score - 5); // Rapid dip if it just failed into red zone
     }
     
     normalizedGenePulse[c.name] = Math.max(1, Math.min(10, score)); 
   });
+
+  // 2. Dynamic Alpha Selection: Priority to high-pulse (hot) genes
+  const alphaScoring = CHROMOSOMES.map(c => ({
+    name: c.name,
+    score: (normalizedGenePulse[c.name] * 4.0) + (winnerHistory[c.name] * 0.1) // 90% recent heat, 10% history
+  })).sort((a, b) => b.score - a.score);
+
+  const finalAlphaOrder = alphaScoring.map(s => CHROMOSOMES.find(c => c.name === s.name)!);
 
   let alphaGene = finalAlphaOrder[0];
   if (forcedAlpha) {
