@@ -12,7 +12,7 @@ import {
   getDocs,
   enableIndexedDbPersistence
 } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+import { firebaseConfig } from './firebase-config.ts';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -41,16 +41,18 @@ export function subscribeToHitHistory(callback: (hits: SharedHit[]) => void) {
   });
 }
 
-// Enable offline persistence
-try {
-  enableIndexedDbPersistence(db).catch((err) => {
-    if (err.code === 'failed-precondition') {
-      console.warn('Multiple tabs open, persistence can only be enabled in one tab at a time.');
-    } else if (err.code === 'unimplemented') {
-      console.warn('The current browser does not support all of the features required to enable persistence.');
-    }
-  });
-} catch (e) {}
+// Enable offline persistence only in browser
+if (typeof window !== 'undefined') {
+  try {
+    enableIndexedDbPersistence(db).catch((err) => {
+      if (err.code === 'failed-precondition') {
+        console.warn('Multiple tabs open, persistence can only be enabled in one tab at a time.');
+      } else if (err.code === 'unimplemented') {
+        console.warn('The current browser does not support all of the features required to enable persistence.');
+      }
+    });
+  } catch (e) {}
+}
 
 export async function ensureAuth() {
   if (!auth.currentUser) {
@@ -91,7 +93,7 @@ export async function fetchHitHistoryFromCloud(): Promise<SharedHit[]> {
   return snapshot.docs.map(d => d.data() as SharedHit).reverse();
 }
 
-export async function updateLiveStatus(period: string, prediction: any, evolutionMetadata: any, resonanceData: any) {
+export async function updateLiveStatus(period: string, prediction: any, evolutionMetadata: any, resonanceData: any, genePredictions: any) {
   await ensureAuth();
   const docRef = doc(db, 'live_status', 'current');
   await setDoc(docRef, {
@@ -99,6 +101,7 @@ export async function updateLiveStatus(period: string, prediction: any, evolutio
     prediction,
     evolutionMetadata,
     resonanceData,
+    genePredictions,
     updatedAt: new Date().toISOString()
   });
 }
@@ -108,4 +111,37 @@ export async function getLiveStatus() {
   const docRef = doc(db, 'live_status', 'current');
   const snap = await getDoc(docRef);
   return snap.exists() ? snap.data() : null;
+}
+
+export function subscribeToEvolutionLogs(callback: (logs: any[]) => void, limitCount: number = 40) {
+  const q = query(
+    collection(db, 'evolution_logs'),
+    orderBy('period', 'desc'),
+    limit(limitCount)
+  );
+  return onSnapshot(q, (snapshot) => {
+    const logs = snapshot.docs.map(d => d.data());
+    callback(logs);
+  });
+}
+
+export async function syncEvolutionLogs(logs: any[]) {
+  await ensureAuth();
+  for (const log of logs) {
+    if (log.isLive) continue; // Don't persist live placeholders
+    const docRef = doc(db, 'evolution_logs', log.period);
+    // Only set if not exists or merge to prevent overwriting historical predictions
+    await setDoc(docRef, { ...log, timestamp: new Date().toISOString() }, { merge: true });
+  }
+}
+
+export async function fetchHistoricalLogs(logLimit: number = 40): Promise<any[]> {
+  await ensureAuth();
+  const q = query(
+    collection(db, 'evolution_logs'),
+    orderBy('period', 'desc'),
+    limit(logLimit)
+  );
+  const snapshot = await getDocs(q);
+  return snapshot.docs.map(d => d.data());
 }

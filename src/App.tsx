@@ -39,7 +39,9 @@ import {
   ensureAuth,
   subscribeToLiveStatus,
   subscribeToHitHistory,
-  SharedHit
+  SharedHit,
+  subscribeToEvolutionLogs,
+  syncEvolutionLogs
 } from "./lib/firebase";
 
 function cn(...inputs: ClassValue[]) {
@@ -146,11 +148,13 @@ export default function App() {
 
   const [backendAnalysis, setBackendAnalysis] = useState<AnalysisResult | null>(null);
   const [cloudHits, setCloudHits] = useState<Record<string, boolean>>({});
+  const [cloudLogs, setCloudLogs] = useState<any[]>([]);
   const [cloudPrediction, setCloudPrediction] = useState<{ period: string, prediction: any } | null>(null);
 
   useEffect(() => {
     let unsubLive: (() => void) | null = null;
     let unsubHits: (() => void) | null = null;
+    let unsubLogs: (() => void) | null = null;
 
     const initCloud = async () => {
       try {
@@ -161,10 +165,16 @@ export default function App() {
           const map: Record<string, boolean> = {};
           history.forEach(h => map[h.period] = h.isHit);
           setCloudHits(map);
-          setSyncStatus(prev => ({ source: "Cloud", count: Object.keys(map).length }));
+          setSyncStatus(prev => ({ source: "Cloud", count: Math.max(prev?.count || 0, Object.keys(map).length) }));
         });
 
-        // 2. Subscribe to Live Consensus (Master Number sync)
+        // 2. Subscribe to Evolution Logs (Detailed Table sync)
+        unsubLogs = subscribeToEvolutionLogs((logs) => {
+          setCloudLogs(logs);
+          console.log(`📡 [Cloud] Synced ${logs.length} evolution logs.`);
+        }, 60);
+
+        // 3. Subscribe to Live Consensus (Master Number sync)
         unsubLive = subscribeToLiveStatus((data) => {
           if (data && data.prediction) {
             setCloudPrediction({
@@ -181,6 +191,7 @@ export default function App() {
     return () => {
       unsubLive?.();
       unsubHits?.();
+      unsubLogs?.();
     };
   }, [data.length]);
 
@@ -257,13 +268,31 @@ export default function App() {
     return () => clearInterval(schedule);
   }, [targetTime, timeOffset]);
 
+  const [lockedStrategy, setLockedStrategy] = useState<string | null>(localStorage.getItem("locked_strategy"));
+
+  const toggleLock = (name: string) => {
+    const newLock = lockedStrategy === name ? null : name;
+    setLockedStrategy(newLock);
+    if (newLock) localStorage.setItem("locked_strategy", newLock);
+    else localStorage.removeItem("locked_strategy");
+  };
+
   const analysis = useMemo(() => {
     if (data.length === 0) return null;
     
-    // 1. Get temporary simulated analysis
-    const result = perform3DAnalysis(data);
+    // 1. If backend analysis is already synchronized and matches our current period, 
+    // we use it as the "Locked" master record to prevent local recalculation drift.
+    const currentPeriod = data[0]?.period;
+    if (backendAnalysis && backendAnalysis.prediction.evolutionLevel > 0 && !lockedStrategy) {
+      // Small check to ensure it's for the right period 
+      // (Backend analysis usually predicts for currentPeriod + 1, so we check data history length)
+      return backendAnalysis;
+    }
     
-    // 2. Pure UI Logic: Combine current results with cloud overrides
+    // 2. Fallback to local analysis for manual overrides or if backend sync is missing
+    const result = perform3DAnalysis(data, cloudLogs, lockedStrategy || undefined);
+    
+    // 3. Pure UI Logic: Combine current results with cloud overrides
     try {
       const storageKey = "evolution_history_v2";
       const saved = localStorage.getItem(storageKey);
@@ -284,15 +313,23 @@ export default function App() {
 
       result.hitHistory = finalizedHistory;
 
-      // 3. Consensus Override: Use cloud prediction if same period
+      // 3. Consensus Override: Use cloud prediction if same period (only if no manual lock)
       const currentPeriod = data[0]?.period;
-      if (cloudPrediction && cloudPrediction.period === currentPeriod) {
-        result.prediction = cloudPrediction.prediction;
+      if (cloudPrediction && cloudPrediction.period === currentPeriod && !lockedStrategy) {
+        // Ensure atomic update of all prediction-related fields to avoid inconsistency
+        result.prediction = {
+          ...result.prediction,
+          ...cloudPrediction.prediction
+        };
+        
         if (cloudPrediction.resonanceData) {
           result.genePulse = cloudPrediction.resonanceData;
         }
         if (cloudPrediction.evolutionMetadata) {
           result.evolutionMetrics = cloudPrediction.evolutionMetadata;
+        }
+        if (cloudPrediction.genePredictions) {
+          result.genePredictions = cloudPrediction.genePredictions;
         }
       }
     } catch (e) {
@@ -347,13 +384,19 @@ export default function App() {
         localStorage.setItem(storageKey, JSON.stringify(localHistoryMap));
         syncHitHistoryToCloud(newHitsForCloud).catch(console.error);
         
+        // Also sync the full detail log to Cloud to satisfy "Everything Synced" requirement
+        if (analysis.evolutionLogs) {
+           syncEvolutionLogs(analysis.evolutionLogs).catch(console.error);
+        }
+        
         // Always push current prediction to cloud if it's the latest (including Pulse resonance)
         // Add fallbacks to ensure Firestore doesn't receive 'undefined'
         updateLiveStatus(
           data[0].period, 
           analysis.prediction || {}, 
           analysis.evolutionMetrics || {}, 
-          analysis.genePulse || {}
+          analysis.genePulse || {},
+          analysis.genePredictions || {}
         ).catch(console.error);
       }
     } catch (e) {
@@ -470,15 +513,23 @@ export default function App() {
         )}>
            <div className="flex items-center justify-between mb-3">
              <div className="flex items-center gap-2">
-               <Zap className={cn("w-3 h-3", analysis?.prediction?.strategy === "INSTANT-RESCUE" ? "text-[#ff4e50]" : "text-[#00ff9d]")} />
+               <Zap className={cn("w-3 h-3", 
+                 lockedStrategy ? "text-[#fbbf24]" :
+                 analysis?.prediction?.strategy === "INSTANT-RESCUE" ? "text-[#ff4e50]" : "text-[#00ff9d]"
+               )} />
                <span className={cn(
                  "text-[10px] font-black uppercase tracking-widest",
+                 lockedStrategy ? "text-[#fbbf24]" :
                  analysis?.prediction?.strategy === "INSTANT-RESCUE" ? "text-[#ff4e50]" : "text-[#00ff9d]"
                )}>
-                 {analysis?.prediction?.strategy === "INSTANT-RESCUE" ? "Instant Rescue Active" : "Infinite learning Active"}
+                 {lockedStrategy ? `Locked: ${lockedStrategy}` :
+                  analysis?.prediction?.strategy === "INSTANT-RESCUE" ? "Instant Rescue Active" : "Infinite learning Active"}
                </span>
              </div>
-             <span className="text-[9px] font-black font-mono text-white/60 bg-white/5 px-1.5 py-0.5 rounded border border-white/10">
+             <span className={cn(
+               "text-[9px] font-black font-mono text-white/60 bg-white/5 px-1.5 py-0.5 rounded border border-white/10",
+               lockedStrategy && "border-[#fbbf24]/30 text-[#fbbf24]/60"
+             )}>
                {analysis?.prediction?.version ?? "V1.0.0"}
              </span>
            </div>
@@ -487,6 +538,7 @@ export default function App() {
                 <span className="text-[8px] text-white/40 uppercase">Evolution Level</span>
                 <span className={cn(
                   "text-[12px] font-bold",
+                  lockedStrategy ? "text-[#fbbf24]" :
                   analysis?.prediction?.strategy === "INSTANT-RESCUE" ? "text-[#ff4e50]" : "text-[#00ff9d]"
                 )}>LV.{analysis?.prediction?.evolutionLevel?.toFixed(1) ?? "0.0"}</span>
               </div>
@@ -496,33 +548,46 @@ export default function App() {
                   <motion.div 
                     animate={{ scale: [1, 1.2, 1], opacity: [1, 0.5, 1] }}
                     transition={{ duration: 2, repeat: Infinity }}
-                    className="w-1 h-1 rounded-full bg-[#00ff9d]"
+                    className={cn("w-1 h-1 rounded-full", lockedStrategy ? "bg-[#fbbf24]" : "bg-[#00ff9d]")}
                   />
                   <span className={cn(
                     "text-[12px] font-black",
+                    lockedStrategy ? "text-[#fbbf24]" :
                     (analysis?.prediction.evolutionLevel || 0) > 200 ? "text-[#ff4e50]" : "text-[#00ff9d]"
                   )}>{analysis?.prediction?.version ?? "V1.0.0"}</span>
                 </div>
-                <span className="text-[6px] text-[#00ff9d]/60 uppercase font-bold tracking-tighter absolute -bottom-2">Live Evolving</span>
+                <span className={cn("text-[6px] uppercase font-bold tracking-tighter absolute -bottom-2", lockedStrategy ? "text-[#fbbf24]/60" : "text-[#00ff9d]/60")}>
+                  {lockedStrategy ? "Manual Override" : "Live Evolving"}
+                </span>
               </div>
            </div>
            <div className="grid grid-cols-2 gap-4 font-mono mt-3 pt-3 border-t border-white/5">
               <div className="flex flex-col">
-                <span className="text-[8px] text-white/40 uppercase">Opt_Rate</span>
-                <span className="text-[12px] text-[#00ff9d] font-bold">{analysis?.evolutionMetrics?.optimizationRate ?? "99.00%"}</span>
+                <span className="text-[8px] text-[#94a3b8] uppercase">Strategy</span>
+                <span className={cn("text-[12px] font-bold", lockedStrategy ? "text-[#fbbf24]" : "text-[#00ff9d]")}>
+                  {analysis?.prediction?.strategy ?? "ALPHA"}
+                </span>
               </div>
               <div className="flex flex-col items-end">
-                <span className="text-[8px] text-white/40 uppercase">Neural_Link</span>
-                <span className="text-[10px] text-[#00ff9d] font-bold uppercase">Active</span>
+                <span className="text-[8px] text-[#94a3b8] uppercase">Manual_Lock</span>
+                <span className={cn("text-[10px] font-bold uppercase", lockedStrategy ? "text-[#fbbf24]" : "text-white/20")}>
+                  {lockedStrategy ? "Active" : "OFF"}
+                </span>
               </div>
            </div>
         </section>
 
         <button 
           onClick={() => analysis?.prediction.number && setSelectedNum(analysis.prediction.number)}
-          className="w-full p-5 bg-gradient-to-br from-[#1e293b] to-[#0f172a] prediction-ribbon border border-[#00ff9d]/30 text-left hover:from-[#2d3b4f] transition-all group shrink-0"
+          className={cn(
+            "w-full p-5 bg-gradient-to-br from-[#1e293b] to-[#0f172a] border border-[#00ff9d]/30 text-left hover:from-[#2d3b4f] transition-all group shrink-0",
+            lockedStrategy ? "prediction-ribbon border-[#fbbf24]/50 shadow-[0_0_20px_rgba(251,191,36,0.2)]" : "border-[#00ff9d]/30"
+          )}
         >
-          <h3 className="text-[10px] lg:text-[11px] uppercase tracking-[0.5px] lg:tracking-[1px] text-[#00ff9d] mb-3 lg:mb-4 border-l-2 border-[#00ff9d] pl-2 font-black">
+          <h3 className={cn(
+            "text-[10px] lg:text-[11px] uppercase tracking-[0.5px] lg:tracking-[1px] mb-3 lg:mb-4 border-l-2 pl-2 font-black",
+            lockedStrategy ? "text-[#fbbf24] border-[#fbbf24]" : "text-[#00ff9d] border-[#00ff9d]"
+          )}>
             锁定价值洼地 (Evolution Target)
           </h3>
           <div className="flex items-center gap-4 lg:gap-6">
@@ -537,28 +602,46 @@ export default function App() {
         </button>
 
         <section>
-          <h2 className="text-[11px] uppercase tracking-[1px] text-[#94a3b8] mb-4 border-l-2 border-[#3b82f6] pl-2 font-bold">
+          <h2 className="text-[11px] uppercase tracking-[1px] text-[#94a3b8] mb-4 border-l-2 border-[#3b82f6] pl-2 font-bold flex justify-between items-center">
             基因链共振 (Gene Pulse)
+            {lockedStrategy && (
+              <span className="text-[8px] bg-[#fbbf24] text-black px-1 rounded animate-pulse">LOCKED: {lockedStrategy}</span>
+            )}
           </h2>
           <div className="grid grid-cols-2 gap-2">
-            {Object.entries(analysis?.genePulse || {}).map(([name, scoreVal]) => {
+            {["RAPID", "STAL", "ALPH", "AGGR"].map((name) => {
+              const scoreVal = (analysis?.genePulse as any)?.[name] || 0;
               const score = scoreVal as number;
               const isAlpha = analysis?.prediction.strategy === name;
               const predictedNum = analysis?.genePredictions?.[name];
+              const isLocked = lockedStrategy === name;
 
               return (
-                <div key={name} className={cn(
-                  "p-2 border rounded transition-all duration-300",
-                  isAlpha ? "bg-[#00ff9d]/10 border-[#00ff9d]/30" : "bg-black/40 border-white/5"
-                )}>
+                <div 
+                  key={name} 
+                  onClick={() => toggleLock(name)}
+                  className={cn(
+                    "p-2 border rounded transition-all duration-300 cursor-pointer group relative overflow-hidden",
+                    isLocked ? "bg-[#fbbf24]/20 border-[#fbbf24] shadow-[0_0_10px_rgba(251,191,36,0.3)]" :
+                    isAlpha ? "bg-[#00ff9d]/10 border-[#00ff9d]/30" : "bg-black/40 border-white/5"
+                  )}
+                >
+                  {isLocked && (
+                    <div className="absolute top-0 right-0 p-0.5 bg-[#fbbf24] z-10">
+                      <Target className="w-2 h-2 text-black" />
+                    </div>
+                  )}
                   <div className="flex justify-between items-center mb-1.5">
                     <div className="flex items-center gap-1.5">
                       <span className={cn(
                         "text-[8px] font-bold uppercase",
-                        isAlpha ? "text-[#00ff9d]" : "text-white/40"
+                        isLocked ? "text-[#fbbf24]" : isAlpha ? "text-[#00ff9d]" : "text-white/40"
                       )}>{name}</span>
                       {predictedNum && (
-                        <span className="px-1 py-0.5 rounded bg-white/5 text-[9px] font-mono font-bold text-white border border-white/10 leading-none">
+                        <span className={cn(
+                          "px-1 py-0.5 rounded text-[9px] font-mono font-bold border leading-none",
+                          isLocked ? "bg-[#fbbf24]/20 text-[#fbbf24] border-[#fbbf24]/30" : "bg-white/5 text-white border-white/10"
+                        )}>
                           #{predictedNum}
                         </span>
                       )}
@@ -571,7 +654,7 @@ export default function App() {
                       animate={{ width: `${(score / 10) * 100}%` }}
                       className={cn(
                         "h-full transition-all duration-1000",
-                        isAlpha ? "bg-[#00ff9d]" : "bg-[#3b82f6]/40"
+                        isLocked ? "bg-[#fbbf24]" : isAlpha ? "bg-[#00ff9d]" : "bg-[#3b82f6]/40"
                       )}
                     />
                   </div>
@@ -769,7 +852,13 @@ export default function App() {
                     <span className="text-[9px] text-[#e0e6ed] font-bold uppercase">
                       达成率: 
                       <span className="text-[#00ff9d] ml-1 text-[11px] font-black">
-                        {analysis && analysis.hitHistory ? Math.round((analysis.hitHistory.filter(h => h === true).length) / (analysis.hitHistory.filter(h => h !== null).length || 1) * 100) : 0}%
+                        {analysis && analysis.evolutionLogs ? (
+                          (() => {
+                            const pastLogs = analysis.evolutionLogs.filter(l => !l.isLive);
+                            const hits = pastLogs.filter(l => l.genes[l.alphaGeneName]?.isHit).length;
+                            return Math.round((hits / (pastLogs.length || 1)) * 100);
+                          })()
+                        ) : 0}%
                       </span>
                     </span>
                   </div>
@@ -808,7 +897,8 @@ export default function App() {
                             const geneData = row.genes[geneName];
                             const isAlpha = row.alphaGeneName === geneName;
                             const isRed = geneData.rank !== null && geneData.rank >= 1 && geneData.rank <= 3;
-                            const isGreen = geneData.rank !== null && geneData.rank >= 4 && geneData.rank <= 10;
+                            const isBullseye = geneData.isHit; // This is true if rank hit the specific chromosome zone
+                            const isGeneralHit = geneData.rank !== null && geneData.rank >= 4 && geneData.rank <= 10;
                             
                             return (
                               <td key={geneName} className="py-4 text-center">
@@ -828,10 +918,11 @@ export default function App() {
                                       ? "border-[#fbbf24] bg-[#fbbf24]/10 shadow-[0_0_15px_rgba(251,191,36,0.4)] ring-2 ring-[#fbbf24]/30 z-10 scale-105" 
                                       : "border-white/10 text-white/40",
                                     
-                                    // Status Overrides (Text only for Alpha, All for others)
+                                    // Status Overrides
                                     row.isLive ? (isAlpha ? "text-[#fbbf24] border-dashed" : "bg-white/5 border-dashed") :
                                     isRed ? (isAlpha ? "text-[#ff4e50]" : "text-[#ff4e50] border-[#ff4e50]/20 bg-[#ff4e50]/5") :
-                                    isGreen ? (isAlpha ? "text-[#00ff9d]" : "text-[#00ff9d] border-[#00ff9d]/20 bg-[#00ff9d]/5") :
+                                    isBullseye ? (isAlpha ? "text-[#00ff9d]" : "text-[#00ff9d] border-[#00ff9d]/20 bg-[#00ff9d]/10 font-bold") :
+                                    isGeneralHit ? (isAlpha ? "text-[#00ff9d]/70" : "text-[#00ff9d]/40 border-white/5") :
                                     (isAlpha ? "text-[#fbbf24]" : "")
                                   )}>
                                     {geneData.prediction.toString().padStart(2, '0')}
@@ -841,9 +932,9 @@ export default function App() {
                                   <div className={cn(
                                     "text-[8px] font-bold uppercase h-3",
                                     row.isLive ? "text-white/10" :
-                                    isAlpha ? (isRed ? "text-[#ff4e50]/80" : isGreen ? "text-[#00ff9d]/80" : "text-[#fbbf24]/80") :
+                                    isAlpha ? (isRed ? "text-[#ff4e50]/80" : isGeneralHit ? "text-[#00ff9d]/80" : "text-[#fbbf24]/80") :
                                     isRed ? "text-[#ff4e50]/60" :
-                                    isGreen ? "text-[#00ff9d]/60" :
+                                    isGeneralHit ? "text-[#00ff9d]/60" :
                                     "text-white/20"
                                   )}>
                                     {row.isLive ? "---" : `P${geneData.rank?.toString().padStart(2, '0')}`}
@@ -851,8 +942,13 @@ export default function App() {
   
                                   {/* Zone Bubble */}
                                   <div className="h-4">
-                                    {!row.isLive && isGreen && (
-                                      <div className="px-1 py-0 bg-[#00ff9d]/20 text-[#00ff9d] text-[7px] font-black rounded border border-[#00ff9d]/30 scale-90 origin-center">
+                                    {(row.isLive || isGeneralHit) && (
+                                      <div className={cn(
+                                        "px-1 py-0 text-[7px] font-black rounded border scale-90 origin-center transition-all",
+                                        isBullseye || row.isLive
+                                          ? "bg-[#00ff9d]/20 text-[#00ff9d] border-[#00ff9d]/30" 
+                                          : "bg-white/5 text-white/20 border-white/5"
+                                      )}>
                                         {geneData.targetZone}
                                       </div>
                                     )}

@@ -3,7 +3,8 @@ import { createServer as createViteServer } from "vite";
 import axios from "axios";
 import path from "path";
 import { fileURLToPath } from "url";
-import { perform3DAnalysis, type AnalysisResult } from "./src/lib/analysis.ts";
+import { perform3DAnalysis, type AnalysisResult, type EvolutionLogRow } from "./src/lib/analysis.ts";
+import { syncEvolutionLogs, fetchHistoricalLogs, updateLiveStatus, getLiveStatus } from "./src/lib/firebase.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,29 +14,46 @@ interface LotteryEntry {
   numbers: number[];
 }
 
-let globalLotteryData: LotteryEntry[] = [
-  { period: "21317521", numbers: [4, 7, 6, 9, 1, 8, 3, 5, 2, 10] },
-  { period: "21317520", numbers: [9, 2, 3, 1, 10, 6, 5, 8, 4, 7] },
-  { period: "21317519", numbers: [10, 7, 2, 6, 9, 8, 5, 1, 3, 4] }
-];
+let globalLotteryData: LotteryEntry[] = [];
 
 let globalAnalysis: AnalysisResult | null = null;
+let lastAnalyzedPeriod: string | null = null;
+let isInitializing = true;
+
 let lastSyncMeta = {
   source: "initial",
   fetchedAt: new Date().toISOString(),
-  nextDraw: { period: "21317522", countdown: "00:00:00" },
+  nextDraw: { period: "21317183", countdown: "00:00:00" },
   serverTime: Date.now()
 };
 
 async function terminalSyncAndAnalyze() {
-  console.log("📡 [Background Sync] Analysis Terminal Sync Starting...");
+  console.log("📡 [Background Sync] Starting sync cycle...");
   const url = "https://wuk.168y.cloudns.org/";
   
   try {
+    // On first run, try to pull state from Cloud to satisfy "Locking" logic across restarts
+    if (isInitializing) {
+      console.log("📡 [Initialization] Attempting to restore state from Cloud...");
+      try {
+        const cloudStatus = await getLiveStatus();
+        if (cloudStatus && cloudStatus.prediction) {
+          console.log(`✅ [Initialization] Restored consensus for period ${cloudStatus.period}`);
+          lastAnalyzedPeriod = cloudStatus.period;
+          // We'll reconstruct analysis object partially or wait for sync to fill data
+        }
+      } catch (e) {
+        console.warn("⚠️ [Initialization] Cloud restore failed, proceeding with fresh sync.");
+      }
+      isInitializing = false;
+    }
+
+    console.log("📡 [Background Sync] Fetching data from 168y...");
     const response = await axios.get(`${url}?t=${Date.now()}`, {
       headers: { "User-Agent": "Mozilla/5.0 Node.js" },
-      timeout: 10000,
+      timeout: 20000,
     });
+    console.log("📡 [Background Sync] Data fetched, parsing...");
 
     const dataStr = typeof response.data === "string" ? response.data : JSON.stringify(response.data);
     const newRecords: any[] = [];
@@ -52,18 +70,21 @@ async function terminalSyncAndAnalyze() {
       }
     }
 
+    let hasNewData = false;
     if (newRecords.length > 0) {
       console.log(`✅ [Background Sync] Extracted ${newRecords.length} records from 168y`);
       newRecords.forEach(rec => {
         if (!globalLotteryData.find(d => d.period === rec.period)) {
           globalLotteryData.push(rec);
+          hasNewData = true;
         }
       });
       globalLotteryData.sort((a, b) => Number(b.period) - Number(a.period));
       if (globalLotteryData.length > 200) globalLotteryData = globalLotteryData.slice(0, 200);
     }
 
-    const currentLatest = globalLotteryData.length > 0 ? Number(globalLotteryData[0].period) : 21317182;
+    const currentLatestPeriod = globalLotteryData.length > 0 ? globalLotteryData[0].period : "0";
+    const currentLatest = globalLotteryData.length > 0 ? Number(currentLatestPeriod) : 21317182;
     const now = Date.now();
     const bjTime = new Date(now + (new Date().getTimezoneOffset() + 480) * 60000);
     const currentHourSeconds = bjTime.getMinutes() * 60 + bjTime.getSeconds();
@@ -84,8 +105,56 @@ async function terminalSyncAndAnalyze() {
       serverTime: now
     };
 
-    if (globalLotteryData.length >= 10) {
-      globalAnalysis = perform3DAnalysis(globalLotteryData);
+    // LOCKING LOGIC: Only re-analyze if we have new data OR if no analysis exists for the CURRENT period
+    // Even if it's the first run, if lastAnalyzedPeriod (from Cloud) matches currentLatestPeriod, we SKIP.
+    const isLocked = globalAnalysis && currentLatestPeriod === lastAnalyzedPeriod && !hasNewData;
+    
+    if (globalLotteryData.length >= 10 && !isLocked) {
+      try {
+        console.log(`📡 [Background Sync] Core Trigger: New draw ${currentLatestPeriod} detected. Run Analysis.`);
+        lastAnalyzedPeriod = currentLatestPeriod;
+        
+        console.log("📡 [Background Sync] Fetching historical logs from Cloud...");
+        const historyLogs = await fetchHistoricalLogs(60);
+        console.log(`📡 [Background Sync] Found ${historyLogs.length} historical logs. Starting Engine...`);
+        
+        globalAnalysis = perform3DAnalysis(globalLotteryData, historyLogs);
+        
+        // Detailed Hit and Pulse Monitoring for stabilization
+        if (globalAnalysis.evolutionLogs && globalAnalysis.evolutionLogs.length > 0) {
+            const lastCompleted = globalAnalysis.evolutionLogs[globalAnalysis.evolutionLogs.length - 1];
+            console.log(`🎯 [Background Sync] Period ${lastCompleted.period} Hits:`, 
+                Object.entries(lastCompleted.genes)
+                    .filter(([_, g]) => g.isHit)
+                    .map(([name, _]) => name)
+                    .join(', ') || 'NONE'
+            );
+        }
+        
+        console.log("📡 [Background Sync] 3D Analysis complete.");
+        console.log("📊 [Dynamic Pulse Status]:", JSON.stringify(globalAnalysis.genePulse));
+        
+        // Auto-persist new findings to prevent data loss
+        if (globalAnalysis.evolutionLogs) {
+          console.log("📡 [Background Sync] Syncing evolution logs to Cloud...");
+          await syncEvolutionLogs(globalAnalysis.evolutionLogs);
+          console.log("📡 [Background Sync] Updating live status in Cloud...");
+          await updateLiveStatus(
+            globalLotteryData[0].period,
+            globalAnalysis.prediction || {},
+            globalAnalysis.evolutionMetrics || {},
+            globalAnalysis.genePulse || {},
+            globalAnalysis.genePredictions || {}
+          );
+          console.log("📡 [Background Sync] Cloud sync complete.");
+        }
+      } catch (e) {
+        console.warn("[Background Sync] Persistent analysis failed, fallback to local:", e);
+        globalAnalysis = perform3DAnalysis(globalLotteryData);
+        lastAnalyzedPeriod = currentLatestPeriod;
+      }
+    } else if (globalLotteryData.length >= 10) {
+      console.log(`🔏 [Background Sync] Logic Locked: Results for Period ${currentLatestPeriod} already finalized.`);
     }
   } catch (err: any) {
     console.warn(`[Background Sync] Sync failed: ${err.message}`);
@@ -109,14 +178,6 @@ async function startServer() {
     });
   });
 
-  // Initial sync
-  terminalSyncAndAnalyze();
-  
-  // High-frequency sync every 30 seconds
-  setInterval(() => {
-    terminalSyncAndAnalyze();
-  }, 30 * 1000);
-
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
@@ -134,6 +195,14 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    
+    // Kick off initial sync after listener is established
+    terminalSyncAndAnalyze();
+    
+    // High-frequency sync every 30 seconds
+    setInterval(() => {
+      terminalSyncAndAnalyze();
+    }, 30 * 1000);
   });
 }
 

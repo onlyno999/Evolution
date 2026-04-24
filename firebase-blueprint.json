@@ -24,12 +24,28 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["period", "prediction", "updatedAt"]
+    },
+    "PersistenceLog": {
+      "title": "Historical Recommendation Log",
+      "description": "The specific state of all models for a historical period",
+      "type": "object",
+      "properties": {
+        "period": { "type": "string" },
+        "alphaGeneName": { "type": "string" },
+        "genes": { "type": "object" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["period", "alphaGeneName", "genes", "timestamp"]
     }
   },
   "firestore": {
     "/hit_history/{periodId}": {
       "schema": "HitRecord",
       "description": "Logged history of red/green lights"
+    },
+    "/evolution_logs/{periodId}": {
+      "schema": "PersistenceLog",
+      "description": "Persistent record of all model predictions per period"
     },
     "/live_status/current": {
       "schema": "GlobalState",
