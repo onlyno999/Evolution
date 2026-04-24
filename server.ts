@@ -27,14 +27,14 @@ let lastSyncMeta = {
   serverTime: Date.now()
 };
 
-async function terminalSyncAndAnalyze(retries = 2) {
-  console.log(`📡 [Background Sync] Analysis Terminal Sync Starting... (Retries left: ${retries})`);
+async function terminalSyncAndAnalyze() {
+  console.log("📡 [Background Sync] Analysis Terminal Sync Starting...");
   const url = "https://wuk.168y.cloudns.org/";
   
   try {
     const response = await axios.get(`${url}?t=${Date.now()}`, {
       headers: { "User-Agent": "Mozilla/5.0 Node.js" },
-      timeout: 30000,
+      timeout: 10000,
     });
 
     const dataStr = typeof response.data === "string" ? response.data : JSON.stringify(response.data);
@@ -89,10 +89,6 @@ async function terminalSyncAndAnalyze(retries = 2) {
     }
   } catch (err: any) {
     console.warn(`[Background Sync] Sync failed: ${err.message}`);
-    if (retries > 0) {
-      console.log(`[Background Sync] Retrying in 2 seconds...`);
-      setTimeout(() => terminalSyncAndAnalyze(retries - 1), 2000);
-    }
   }
 }
 

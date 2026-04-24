@@ -14,9 +14,7 @@ import {
   Microscope,
   Box,
   LineChart,
-  Database,
-  Activity,
-  ChevronRight
+  Database
 } from "lucide-react";
 import { 
   ComposedChart, 
@@ -32,7 +30,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
-import { perform3DAnalysis, type LotteryEntry, type AnalysisResult, CHROMOSOMES } from "./lib/analysis";
+import { perform3DAnalysis, type LotteryEntry, type AnalysisResult } from "./lib/analysis";
 import { 
   fetchHitHistoryFromCloud, 
   syncHitHistoryToCloud, 
@@ -267,34 +265,19 @@ export default function App() {
     
     // 2. Pure UI Logic: Combine current results with cloud overrides
     try {
-      const storageKey = "evolution_consensus_v7_alignment";
+      const storageKey = "evolution_history_v2";
       const saved = localStorage.getItem(storageKey);
       const localHistoryMap: Record<string, boolean> = saved ? JSON.parse(saved) : {};
       
+      // Combine with cloud data (Cloud has priority)
       const combinedHistoryMap = { ...localHistoryMap, ...cloudHits };
       
-      const finishedRounds = data.filter(d => d.numbers && d.numbers.length === 10);
-      
-      // 深度对齐：我们有 result.hitHistory [旧 -> 新]
-      // 也有 finishedRounds [新 -> 旧]
-      // 我们需要确保显示出的 20 个灯，准确对应最近的 20 个已开奖期号
+      // Restore the "Consensus" History for UI display
       const finalizedHistory = result.hitHistory.map((h, i) => {
-        const offset = result.hitHistory.length - 1 - i;
-        const targetRound = finishedRounds[offset];
-        
-        if (targetRound) {
-          const p = targetRound.period;
-          const predNum = result.predictionHistory[p];
-          
-          // CRITICAL: Force UI to calculate truth based on actual rank if cloud sync is messy
-          if (predNum !== undefined) {
-             const actualRank = targetRound.numbers.indexOf(predNum) + 1;
-             // Any position between 4 and 10 is a definitive GREEN HIT
-             if (actualRank >= 4 && actualRank <= 10) return true;
-             if (actualRank >= 1 && actualRank <= 3) return false;
-          }
-
-          if (combinedHistoryMap[p] !== undefined) return combinedHistoryMap[p];
+        const dataIdx = 19 - i;
+        if (dataIdx >= 0 && dataIdx < data.length) {
+          const p = data[dataIdx].period;
+          return combinedHistoryMap[p] !== undefined ? combinedHistoryMap[p] : h;
         }
         return h;
       });
@@ -331,7 +314,7 @@ export default function App() {
     if (!analysis || data.length === 0) return;
 
     try {
-      const storageKey = "evolution_consensus_v7_alignment";
+      const storageKey = "evolution_history_v2";
       const saved = localStorage.getItem(storageKey);
       const localHistoryMap: Record<string, boolean> = saved ? JSON.parse(saved) : {};
       
@@ -340,12 +323,10 @@ export default function App() {
 
       // Detect if we have new results that need to be broadcast to cloud
       analysis.hitHistory.forEach((h, i) => {
-        const reverseIdx = analysis.hitHistory.length - 1 - i;
-        const finishedRounds = data.filter(d => d.numbers && d.numbers.length === 10);
-        const targetRound = finishedRounds[reverseIdx];
-
-        if (targetRound) {
-          const p = targetRound.period;
+        const dataIdx = 19 - i;
+        if (dataIdx >= 0 && dataIdx < data.length) {
+          const p = data[dataIdx].period;
+          // IMPORTANT: Use the actual number predicted for THIS past period during simulation
           const historicalPredictionNum = analysis.predictionHistory[p];
           
           if (cloudHits[p] === undefined && h !== null && localHistoryMap[p] === undefined && historicalPredictionNum) {
@@ -560,45 +541,34 @@ export default function App() {
             基因链共振 (Gene Pulse)
           </h2>
           <div className="grid grid-cols-2 gap-2">
-            {Object.entries(analysis?.genePulse || {}).map(([name, rawScore]) => {
-              const score = Number(rawScore);
+            {Object.entries(analysis?.genePulse || {}).map(([name, scoreVal]) => {
+              const score = scoreVal as number;
               const isAlpha = analysis?.prediction.strategy === name;
               const predictedNum = analysis?.genePredictions?.[name];
-              
-              const zoneMap: Record<string, string> = {
-                "Rapid-Rebound": "P4-P6",
-                "Stable-Trend": "P6-P8",
-                "Alpha-Centrist": "P7-P9",
-                "Aggressive-Deep": "P8-P10"
-              };
 
               return (
                 <div key={name} className={cn(
                   "p-2 border rounded transition-all duration-300",
-                  isAlpha ? "bg-[#00ff9d]/10 border-[#00ff9d]/30 shadow-[0_0_10px_rgba(0,255,157,0.05)]" : "bg-black/40 border-white/5"
+                  isAlpha ? "bg-[#00ff9d]/10 border-[#00ff9d]/30" : "bg-black/40 border-white/5"
                 )}>
                   <div className="flex justify-between items-center mb-1.5">
                     <div className="flex items-center gap-1.5">
-                      <div className="flex flex-col">
-                        <span className={cn(
-                          "text-[8px] font-bold uppercase",
-                          isAlpha ? "text-[#00ff9d]" : "text-white/40"
-                        )}>{name}</span>
-                        <span className="text-[7px] text-white/30 font-mono tracking-wider">{zoneMap[name]}</span>
-                      </div>
+                      <span className={cn(
+                        "text-[8px] font-bold uppercase",
+                        isAlpha ? "text-[#00ff9d]" : "text-white/40"
+                      )}>{name}</span>
                       {predictedNum && (
                         <span className="px-1 py-0.5 rounded bg-white/5 text-[9px] font-mono font-bold text-white border border-white/10 leading-none">
                           #{predictedNum}
                         </span>
                       )}
                     </div>
-                    <span className="text-[9px] font-mono text-white/60">{score}/1000</span>
+                    <span className="text-[9px] font-mono text-white/60">{score}/10</span>
                   </div>
-                  
-                  <div className="h-1 bg-white/5 rounded-full overflow-hidden mt-1">
+                  <div className="h-1 bg-white/5 rounded-full overflow-hidden">
                     <motion.div 
                       initial={{ width: 0 }}
-                      animate={{ width: `${(score / 1000) * 100}%` }}
+                      animate={{ width: `${(score / 10) * 100}%` }}
                       className={cn(
                         "h-full transition-all duration-1000",
                         isAlpha ? "bg-[#00ff9d]" : "bg-[#3b82f6]/40"
@@ -608,88 +578,6 @@ export default function App() {
                 </div>
               );
             })}
-          </div>
-
-          {/* 演化实战日志 (EVOLUTION LOGS) */}
-          <div className="bg-black/40 border border-white/10 rounded-xl overflow-hidden mt-3 shadow-inner">
-            <div className="px-3 py-2 border-b border-white/10 flex items-center justify-between bg-white/5">
-              <div className="flex items-center gap-2">
-                <Database className="w-3.5 h-3.5 text-[#00ff9d]" />
-                <span className="text-[10px] font-bold tracking-widest text-[#00ff9d]">演化实战日志 / EVOLUTION LOGS</span>
-              </div>
-              <span className="text-[8px] text-white/30 font-mono">HISTORY [LAST 20 ROUNDS]</span>
-            </div>
-            <div className="max-h-[220px] overflow-y-auto custom-scrollbar">
-              <table className="w-full text-left border-collapse table-fixed">
-                <thead className="sticky top-0 bg-[#0a0a0a] z-10">
-                  <tr className="border-b border-white/5">
-                    <th className="p-2 w-[50px] text-[8px] text-white/40 font-mono uppercase">期号</th>
-                    <th className="p-2 text-[8px] text-white/40 font-mono uppercase text-center">RAPID</th>
-                    <th className="p-2 text-[8px] text-white/40 font-mono uppercase text-center">STAL</th>
-                    <th className="p-2 text-[8px] text-white/40 font-mono uppercase text-center">ALPH</th>
-                    <th className="p-2 text-[8px] text-white/40 font-mono uppercase text-center">AGGR</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                        {[...(analysis?.geneHistory || [])].reverse().map((round) => (
-                          <tr key={round.period} className={cn(
-                            "hover:bg-white/5 transition-colors",
-                            (Object.values(round.results)[0] as any).rank === -1 && "bg-[#00ff9d]/5 border-y border-[#00ff9d]/20"
-                          )}>
-                            <td className="p-2 text-[10px] font-mono text-white/70 whitespace-nowrap">
-                              {round.period.slice(-3)}
-                              {(Object.values(round.results)[0] as any).rank === -1 && (
-                                <span className="ml-1 text-[7px] bg-[#00ff9d] text-black px-0.5 rounded font-bold animate-pulse">LIVE</span>
-                              )}
-                            </td>
-                            {CHROMOSOMES.map(c => {
-                              const res = round.results[c.name];
-                              if (!res) return <td key={c.name} className="p-2 text-center text-[10px] text-white/10">-</td>;
-                              const isPending = res.rank === -1;
-                              const isWin = res.rank >= 4 && res.rank <= 10;
-                              const isLeader = round.leader === c.name;
-                              
-                              return (
-                                <td key={c.name} className="p-2 text-center">
-                                  <div className="flex flex-col items-center">
-                                    <span className={cn(
-                                      "text-[10px] font-bold px-1.5 rounded-sm min-w-[20px] leading-tight transition-all duration-300",
-                                      isLeader && "ring-1 ring-yellow-400/60 shadow-[0_0_8px_rgba(250,204,21,0.3)]",
-                                      isPending ? "text-white/80 bg-white/10 border border-white/20" :
-                                      isWin ? "text-green-400 bg-green-400/10" : "text-red-400 bg-red-400/10"
-                                    )}>
-                                      {res.num.toString().padStart(2, '0')}
-                                    </span>
-                                    <span className={cn(
-                                      "text-[7px] font-mono mt-0.5",
-                                      isLeader ? "text-yellow-400/70 font-bold" : "text-white/30"
-                                    )}>
-                                      {isPending ? "---" : `P${res.rank.toString().padStart(2, '0')}`}
-                                    </span>
-                                    {!isPending && res.rank >= 4 && res.rank <= 10 && (
-                                      <span className={cn(
-                                        "text-[6px] px-1 rounded-full border leading-none mt-0.5 py-0.5",
-                                        (c.weights.zonePreference === 1 && res.rank >= 4 && res.rank <= 6) ||
-                                        (c.weights.zonePreference === 2 && res.rank >= 6 && res.rank <= 8) ||
-                                        (c.weights.zonePreference === 3 && res.rank >= 7 && res.rank <= 9) ||
-                                        (c.weights.zonePreference === 4 && res.rank >= 8 && res.rank <= 10)
-                                          ? "bg-green-500/30 text-green-200 border-green-500/40 font-bold"
-                                          : "text-white/20 border-white/10"
-                                      )}>
-                                        {c.weights.zonePreference === 1 ? "P4-6" :
-                                         c.weights.zonePreference === 2 ? "P6-8" :
-                                         c.weights.zonePreference === 3 ? "P7-9" : "P8-10"}
-                                      </span>
-                                    )}
-                                  </div>
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        ))}
-                </tbody>
-              </table>
-            </div>
           </div>
         </section>
 
@@ -823,100 +711,166 @@ export default function App() {
           </div>
 
           {/* Bottom Panel - Prediction and Analysis */}
-      <section className="bottom-panel sleek-panel flex flex-col lg:flex-row items-stretch border-t border-[#2d343d] p-0">
-        <div className="flex-1 p-4 lg:p-6 border-b lg:border-b-0 lg:border-r border-[#2d343d]">
-          <div className="flex items-center justify-between mb-3 lg:mb-4">
-            <h3 className="text-[10px] lg:text-[11px] uppercase tracking-[0.5px] lg:tracking-[1px] text-[#94a3b8] border-l-2 border-[#3b82f6] pl-2 font-bold">
-              DNA 动能进化分析 (Dynamic Evolution)
-            </h3>
-            <div className="flex items-center gap-1.5 px-2 py-0.5 bg-[#3b82f6]/10 border border-[#3b82f6]/20 rounded">
-              <div className="w-1 h-1 rounded-full bg-[#3b82f6] animate-pulse" />
-              <span className="text-[8px] text-[#3b82f6] font-mono font-bold uppercase tracking-tighter">Self-Learning Active</span>
-            </div>
-          </div>
-          <p className="text-[10px] lg:text-[11px] text-[#94a3b8] font-mono uppercase mb-2 lg:mb-3">全自动逻辑闭环导向：</p>
-          <div className="flex items-baseline gap-3 lg:gap-4">
-             <div className="text-[24px] lg:text-[28px] font-black font-mono text-[#3b82f6]">EVO: {analysis?.prediction.number.toString().padStart(2, '0')}</div>
-             <div className="text-[9px] lg:text-[10px] text-[#3b82f6] font-mono font-bold">Confidence: {analysis?.prediction.confidence}%</div>
-          </div>
-        </div>
-
-        <div className="flex-1 p-4 lg:p-6 lg:border-r border-[#2d343d]">
-          <div className="flex items-center justify-between mb-3 lg:mb-4">
-            <h3 className="text-[10px] lg:text-[11px] uppercase tracking-[0.5px] lg:tracking-[1px] text-[#94a3b8] border-l-2 border-[#ff4e50] pl-2 font-bold">
-              进化回路性能简报 (Feedback Loop)
-            </h3>
-            <div className="flex items-center gap-1.5 px-2 py-0.5 bg-[#00ff9d]/10 border border-[#00ff9d]/20 rounded">
-              <div className="w-1 h-1 rounded-full bg-[#00ff9d] animate-pulse" />
-              <span className="text-[8px] text-[#00ff9d] font-mono font-bold uppercase tracking-tighter">Real-Time Logged</span>
-            </div>
-          </div>
-          <p className="text-[10px] lg:text-[11px] text-[#94a3b8] font-mono uppercase mb-3">近20期逻辑进化达成率：</p>
-          <div className="flex gap-2 items-center flex-wrap bg-white/5 p-3 rounded border border-white/5">
-            <div className="flex gap-1.5 items-center flex-wrap flex-1">
-              {Array.from({ length: 20 }).map((_, i) => {
-                const history = analysis?.hitHistory || [];
-                const hit = history[i];
-                return (
-                  <div key={i} className="relative w-3.5 h-3.5">
-                    {/* Fixed Deep Background */}
-                    <div className="absolute inset-0 rounded-full bg-black/40 border border-white/5" />
-                    
-                    {/* Persistent Color Core */}
-                    <motion.div 
-                      initial={{ opacity: 0, scale: 0.5 }}
-                      animate={hit !== undefined && hit !== null ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.5 }}
+          <section className="bottom-panel sleek-panel border-t border-[#2d343d] p-0">
+            <div className="p-4 lg:p-6 border-b border-[#2d343d]">
+              <h3 className="text-[10px] lg:text-[11px] uppercase tracking-[0.5px] lg:tracking-[1px] text-[#94a3b8] mb-3 lg:mb-4 border-l-2 border-[#00ff9d] pl-2 font-bold">
+                实时开奖同步 (Latest Result)
+              </h3>
+              <p className="text-[10px] lg:text-[11px] text-[#94a3b8] font-mono uppercase mb-2">
+                期号: {data?.[0]?.period || "---"} 状态: 已封标校准
+              </p>
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {(data?.[0]?.numbers || []).map((num, i) => {
+                  const rank = i + 1;
+                  const isRecommended = analysis?.prediction && num === analysis.prediction.number;
+                  
+                  return (
+                    <div 
+                      key={i} 
                       className={cn(
-                        "absolute inset-0 rounded-full border transition-all duration-700",
-                        hit === true ? "bg-[#00ff9d] border-[#00ff9d]/40 shadow-[0_0_10px_rgba(0,255,157,0.6)]" : 
-                        hit === false ? "bg-[#ff4e50] border-[#ff4e50]/40 shadow-[0_0_10px_rgba(255,78,80,0.6)]" : 
-                        ""
+                        "w-6 h-6 sm:w-7 sm:h-7 rounded-full flex items-center justify-center text-[10px] sm:text-[11px] font-bold border transition-all",
+                        isRecommended && rank >= 4 
+                          ? "bg-[#00ff9d] text-[#090b0e] border-[#00ff9d] shadow-[0_0_10px_rgba(0,255,157,0.5)] scale-110" 
+                          : isRecommended && rank <= 3
+                            ? "bg-[#ff4e50] text-white border-[#ff4e50] shadow-[0_0_10px_rgba(255,78,80,0.5)] scale-110 animate-pulse"
+                            : "bg-[#1e293b] text-[#00ff9d] border-[#00ff9d]/30"
                       )}
-                      title={hit === true ? "Hit" : hit === false ? "Fail" : "Wait"}
-                    />
-                  </div>
-                );
-              })}
+                      title={`Position P${rank} - ${rank <= 3 ? 'No Value Zone' : 'Target Zone'}`}
+                    >
+                      {num}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-            <div className="text-[14px] lg:text-[16px] font-black font-mono text-white/90 ml-2 shrink-0">
-              {analysis && analysis.hitHistory ? Math.round((analysis.hitHistory.filter(h => h === true).length) / (analysis.hitHistory.filter(h => h !== null).length || 1) * 100) : 0}%
-            </div>
-          </div>
-        </div>
 
-        <div className="flex-1 p-4 lg:p-6">
-          <h3 className="text-[10px] lg:text-[11px] uppercase tracking-[0.5px] lg:tracking-[1px] text-[#94a3b8] mb-3 lg:mb-4 border-l-2 border-[#00ff9d] pl-2 font-bold">
-            实时开奖同步 (Latest Result)
-          </h3>
-          <p className="text-[10px] lg:text-[11px] text-[#94a3b8] font-mono uppercase mb-2">
-            期号: {data?.[0]?.period || "---"} 状态: 已封标校准
-          </p>
-          <div className="flex flex-wrap gap-1.5 mt-2">
-            {(data?.[0]?.numbers || []).map((num, i) => {
-              const rank = i + 1;
-              const isRecommended = analysis?.prediction && num === analysis.prediction.number;
-              const isLastResultHit = analysis?.hitHistory?.[analysis.hitHistory.length - 1];
-              
-              return (
-                <div 
-                  key={i} 
-                  className={cn(
-                    "w-6 h-6 sm:w-7 sm:h-7 rounded-full flex items-center justify-center text-[10px] sm:text-[11px] font-bold border transition-all",
-                    isRecommended && rank >= 4 
-                      ? "bg-[#00ff9d] text-[#090b0e] border-[#00ff9d] shadow-[0_0_10px_rgba(0,255,157,0.5)] scale-110" 
-                      : isRecommended && rank <= 3
-                        ? "bg-[#ff4e50] text-white border-[#ff4e50] shadow-[0_0_10px_rgba(255,78,80,0.5)] scale-110 animate-pulse"
-                        : "bg-[#1e293b] text-[#00ff9d] border-[#00ff9d]/30"
-                  )}
-                  title={`Position P${rank} - ${rank <= 3 ? 'No Value Zone' : 'Target Zone'}`}
-                >
-                  {num}
+            {/* Evolution Backtest Logs Area */}
+            <div className="p-4 lg:p-6 bg-black/20">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Database className="w-4 h-4 text-[#00ff9d]" />
+                  <h3 className="text-[11px] lg:text-[12px] uppercase tracking-[1px] text-[#00ff9d] font-bold">
+                    演化实战日志 / EVOLUTION LOGS
+                  </h3>
                 </div>
-              );
-            })}
-          </div>
-        </div>
-      </section>
+                <div className="flex flex-col items-end gap-2">
+                  <div className="flex items-center gap-3 text-[8px] text-[#94a3b8] uppercase font-bold tracking-tighter">
+                    <div className="flex items-center gap-1">
+                      <div className="w-1.5 h-1.5 rounded-full border border-[#fbbf24] bg-[#fbbf24]/20 shadow-[0_0_3px_#fbbf24]" />
+                      <span>霸王推荐</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <div className="w-1.5 h-1.5 rounded-full border border-[#ff4e50] bg-[#ff4e50]/20" />
+                      <span>红点警示区</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 bg-[#00ff9d]/10 px-2 py-1 rounded border border-[#00ff9d]/20 shadow-lg">
+                    <Box className="w-2.5 h-2.5 text-[#00ff9d]" />
+                    <span className="text-[9px] text-[#e0e6ed] font-bold uppercase">
+                      达成率: 
+                      <span className="text-[#00ff9d] ml-1 text-[11px] font-black">
+                        {analysis && analysis.hitHistory ? Math.round((analysis.hitHistory.filter(h => h === true).length) / (analysis.hitHistory.filter(h => h !== null).length || 1) * 100) : 0}%
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="max-h-[340px] overflow-y-auto scrollbar-thin scrollbar-track-white/5 scrollbar-thumb-[#00ff9d]/20 border border-white/5 rounded-lg bg-black/20">
+                <div className="min-w-full">
+                  <table className="w-full border-collapse text-[10px] sm:text-[11px] font-mono table-fixed">
+                    <thead className="sticky top-0 bg-[#090b0e] z-10 shadow-[0_1px_0_rgba(255,255,255,0.05)]">
+                      <tr className="text-[#64748b] border-b border-white/5 uppercase">
+                        <th className="w-[60px] text-left py-3 px-3 font-bold">期号</th>
+                        <th className="py-3 px-1 font-bold text-center">RAPID</th>
+                        <th className="py-3 px-1 font-bold text-center">STAL</th>
+                        <th className="py-3 px-1 font-bold text-center">ALPH</th>
+                        <th className="py-3 px-1 font-bold text-center">AGGR</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(analysis?.evolutionLogs || []).map((row, idx) => (
+                        <tr key={row.period} className={cn(
+                          "border-b border-white/5 hover:bg-white/[0.02] transition-colors",
+                          row.isLive && "bg-[#00ff9d]/5"
+                        )}>
+                          <td className="py-4 px-3">
+                            <div className="flex items-center gap-1">
+                              <span className="text-[#e0e6ed] font-bold">
+                                {row.period.length > 3 ? row.period.slice(-3) : row.period}
+                              </span>
+                              {row.isLive && (
+                                <span className="px-1 py-0.5 bg-[#00ff9d]/20 text-[#00ff9d] text-[7px] rounded font-black animate-pulse">LIVE</span>
+                              )}
+                            </div>
+                          </td>
+                          {["RAPID", "STAL", "ALPH", "AGGR"].map(geneName => {
+                            const geneData = row.genes[geneName];
+                            const isAlpha = row.alphaGeneName === geneName;
+                            const isRed = geneData.rank !== null && geneData.rank >= 1 && geneData.rank <= 3;
+                            const isGreen = geneData.rank !== null && geneData.rank >= 4 && geneData.rank <= 10;
+                            
+                            return (
+                              <td key={geneName} className="py-4 text-center">
+                                <div className="flex flex-col items-center gap-1 mx-auto relative">
+                                  {/* Alpha Badge */}
+                                  {isAlpha && (
+                                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-1 bg-[#fbbf24] text-black text-[7px] font-black rounded-[2px] leading-tight z-20 whitespace-nowrap shadow-[0_2px_4px_rgba(0,0,0,0.5)]">
+                                      CHAMPION
+                                    </div>
+                                  )}
+
+                                  {/* Number Pill */}
+                                  <div className={cn(
+                                    "w-9 h-6 flex items-center justify-center rounded border text-[12px] font-black tracking-tight transition-all",
+                                    // Default/Alpha State
+                                    isAlpha 
+                                      ? "border-[#fbbf24] bg-[#fbbf24]/10 shadow-[0_0_15px_rgba(251,191,36,0.4)] ring-2 ring-[#fbbf24]/30 z-10 scale-105" 
+                                      : "border-white/10 text-white/40",
+                                    
+                                    // Status Overrides (Text only for Alpha, All for others)
+                                    row.isLive ? (isAlpha ? "text-[#fbbf24] border-dashed" : "bg-white/5 border-dashed") :
+                                    isRed ? (isAlpha ? "text-[#ff4e50]" : "text-[#ff4e50] border-[#ff4e50]/20 bg-[#ff4e50]/5") :
+                                    isGreen ? (isAlpha ? "text-[#00ff9d]" : "text-[#00ff9d] border-[#00ff9d]/20 bg-[#00ff9d]/5") :
+                                    (isAlpha ? "text-[#fbbf24]" : "")
+                                  )}>
+                                    {geneData.prediction.toString().padStart(2, '0')}
+                                  </div>
+                                  
+                                  {/* PXX Text */}
+                                  <div className={cn(
+                                    "text-[8px] font-bold uppercase h-3",
+                                    row.isLive ? "text-white/10" :
+                                    isAlpha ? (isRed ? "text-[#ff4e50]/80" : isGreen ? "text-[#00ff9d]/80" : "text-[#fbbf24]/80") :
+                                    isRed ? "text-[#ff4e50]/60" :
+                                    isGreen ? "text-[#00ff9d]/60" :
+                                    "text-white/20"
+                                  )}>
+                                    {row.isLive ? "---" : `P${geneData.rank?.toString().padStart(2, '0')}`}
+                                  </div>
+  
+                                  {/* Zone Bubble */}
+                                  <div className="h-4">
+                                    {!row.isLive && isGreen && (
+                                      <div className="px-1 py-0 bg-[#00ff9d]/20 text-[#00ff9d] text-[7px] font-black rounded border border-[#00ff9d]/30 scale-90 origin-center">
+                                        {geneData.targetZone}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+
+            </div>
+          </section>
     </div>
   </div>
 
